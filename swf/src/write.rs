@@ -17,7 +17,12 @@ use std::io::{self, Write};
 /// let header = Header {
 ///     compression: Compression::Zlib,
 ///     version: 6,
-///     stage_size: Rectangle { x_min: Twips::from_pixels(0.0), x_max: Twips::from_pixels(400.0), y_min: Twips::from_pixels(0.0), y_max: Twips::from_pixels(400.0) },
+///     stage_size: Rectangle {
+///         x_min: Twips::ZERO,
+///         x_max: Twips::from_pixels(400.0),
+///         y_min: Twips::ZERO,
+///         y_max: Twips::from_pixels(400.0),
+///     },
 ///     frame_rate: Fixed8::from_f32(60.0),
 ///     num_frames: 1,
 /// };
@@ -91,16 +96,7 @@ fn write_zlib_swf<W: Write>(mut output: W, swf_body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(feature = "libflate", not(feature = "flate2")))]
-fn write_zlib_swf<W: Write>(mut output: W, swf_body: &[u8]) -> Result<()> {
-    use libflate::zlib::Encoder;
-    let mut encoder = Encoder::new(&mut output)?;
-    encoder.write_all(&swf_body)?;
-    encoder.finish().into_result()?;
-    Ok(())
-}
-
-#[cfg(not(any(feature = "flate2", feature = "libflate")))]
+#[cfg(not(feature = "flate2"))]
 fn write_zlib_swf<W: Write>(_output: W, _swf_body: &[u8]) -> Result<()> {
     Err(Error::unsupported(
         "Support for Zlib compressed SWFs is not enabled.",
@@ -562,7 +558,7 @@ impl<W: Write> Writer<W> {
                 if let BitmapFormat::ColorMap8 { num_colors } = tag.format {
                     self.write_u8(num_colors)?;
                 }
-                self.output.write_all(tag.data)?;
+                self.output.write_all(&tag.data)?;
             }
 
             Tag::DefineButton(ref button) => self.write_define_button(button)?,
@@ -1849,10 +1845,10 @@ impl<W: Write> Writer<W> {
     fn write_convolution_filter(&mut self, filter: &ConvolutionFilter) -> Result<()> {
         self.write_u8(filter.num_matrix_cols)?;
         self.write_u8(filter.num_matrix_rows)?;
-        self.write_fixed16(filter.divisor)?;
-        self.write_fixed16(filter.bias)?;
+        self.write_f32(filter.divisor)?;
+        self.write_f32(filter.bias)?;
         for val in &filter.matrix {
-            self.write_fixed16(*val)?;
+            self.write_f32(*val)?;
         }
         self.write_rgba(&filter.default_color)?;
         self.write_u8(filter.flags.bits())?;
@@ -1986,7 +1982,7 @@ impl<W: Write> Writer<W> {
     }
 
     fn write_sound_info(&mut self, sound_info: &SoundInfo) -> Result<()> {
-        let flags = (sound_info.event as u8) << 4
+        let flags = ((sound_info.event as u8) << 4)
             | if sound_info.in_sample.is_some() {
                 0b1
             } else {
@@ -2434,7 +2430,6 @@ fn count_fbits(n: Fixed16) -> u32 {
 #[cfg(test)]
 #[allow(clippy::unusual_byte_groupings)]
 mod tests {
-    use super::Writer;
     use super::*;
     use crate::test_data;
 
@@ -2446,9 +2441,9 @@ mod tests {
                 compression,
                 version: 13,
                 stage_size: Rectangle {
-                    x_min: Twips::from_pixels(0.0),
+                    x_min: Twips::ZERO,
                     x_max: Twips::from_pixels(640.0),
-                    y_min: Twips::from_pixels(0.0),
+                    y_min: Twips::ZERO,
                     y_max: Twips::from_pixels(480.0),
                 },
                 frame_rate: Fixed8::from_f32(60.0),
@@ -2655,10 +2650,10 @@ mod tests {
     #[test]
     fn write_rectangle_signed() {
         let rectangle = Rectangle {
-            x_min: Twips::from_pixels(-1.0),
-            x_max: Twips::from_pixels(1.0),
-            y_min: Twips::from_pixels(-1.0),
-            y_max: Twips::from_pixels(1.0),
+            x_min: -Twips::ONE_PX,
+            x_max: Twips::ONE_PX,
+            y_min: -Twips::ONE_PX,
+            y_max: Twips::ONE_PX,
         };
         let mut buf = Vec::new();
         {
@@ -2781,11 +2776,11 @@ mod tests {
             glyphs: vec![Glyph {
                 shape_records: vec![
                     ShapeRecord::StraightEdge {
-                        delta: PointDelta::new(Twips::ONE, -Twips::ONE),
+                        delta: PointDelta::new(Twips::ONE_PX, -Twips::ONE_PX),
                     },
                     ShapeRecord::CurvedEdge {
-                        control_delta: PointDelta::new(Twips::ONE, Twips::ONE),
-                        anchor_delta: PointDelta::new(Twips::ONE, -Twips::ONE),
+                        control_delta: PointDelta::new(Twips::ONE_PX, Twips::ONE_PX),
+                        anchor_delta: PointDelta::new(Twips::ONE_PX, -Twips::ONE_PX),
                     },
                     ShapeRecord::StraightEdge {
                         delta: PointDelta::new(Twips::ZERO, Twips::ZERO),

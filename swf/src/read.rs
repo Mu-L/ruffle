@@ -8,6 +8,7 @@ use crate::{
 use bitstream_io::BitRead;
 use byteorder::{LittleEndian, ReadBytesExt};
 use simple_asn1::ASN1Block;
+use std::borrow::Cow;
 use std::io::{self, Read};
 
 /// Parse a decompressed SWF.
@@ -135,7 +136,12 @@ pub fn decompress_swf<'a, R: Read + 'a>(mut input: R) -> Result<SwfBuf> {
         frame_rate,
         num_frames,
     };
-    let data = reader.get_ref().to_vec();
+    let offset = reader.as_slice().as_ptr() as usize - data.as_ptr() as usize;
+    // Remove the header.
+    // As an alternative we could return the entire original buffer with header length,
+    // but that's a nontrivial API change, probably not worth the effort.
+    data.drain(..offset);
+    let mut reader = Reader::new(&data, version);
 
     // Parse the first two tags, searching for the FileAttributes and SetBackgroundColor tags.
     // This metadata is useful, so we want to return it along with the header.
@@ -178,14 +184,7 @@ fn make_zlib_reader<'a, R: Read + 'a>(input: R) -> Result<Box<dyn Read + 'a>> {
     Ok(Box::new(ZlibDecoder::new(input)))
 }
 
-#[cfg(all(feature = "libflate", not(feature = "flate2")))]
-fn make_zlib_reader<'a, R: Read + 'a>(input: R) -> Result<Box<dyn Read + 'a>> {
-    use libflate::zlib::Decoder;
-    let decoder = Decoder::new(input)?;
-    Ok(Box::new(decoder))
-}
-
-#[cfg(not(any(feature = "flate2", feature = "libflate")))]
+#[cfg(not(feature = "flate2"))]
 fn make_zlib_reader<'a, R: Read + 'a>(_input: R) -> Result<Box<dyn Read + 'a>> {
     Err(Error::unsupported(
         "Support for Zlib compressed SWFs is not enabled.",
@@ -214,7 +213,7 @@ fn make_lzma_reader<'a, R: Read + 'a>(
     // Bytes 0..5: LZMA properties
     // Bytes 5..13: Uncompressed length
     //
-    // To deal with the mangled header, use lzma_rs options to anually provide uncompressed length.
+    // To deal with the mangled header, use lzma_rs options to manually provide uncompressed length.
 
     // Read compressed length (ignored)
     let _ = input.read_u32::<LittleEndian>()?;
@@ -469,30 +468,18 @@ impl<'a> Reader<'a> {
                 Tag::EnableTelemetry { password_hash }
             }
             TagCode::ImportAssets => {
-                let url = tag_reader.read_str()?;
-                let num_imports = tag_reader.read_u16()?;
-                let mut imports = Vec::with_capacity(num_imports as usize);
-                for _ in 0..num_imports {
-                    imports.push(ExportedAsset {
-                        id: tag_reader.read_u16()?,
-                        name: tag_reader.read_str()?,
-                    });
+                let import_assets = tag_reader.read_import_assets()?;
+                Tag::ImportAssets {
+                    url: import_assets.0,
+                    imports: import_assets.1,
                 }
-                Tag::ImportAssets { url, imports }
             }
             TagCode::ImportAssets2 => {
-                let url = tag_reader.read_str()?;
-                tag_reader.read_u8()?; // Reserved; must be 1
-                tag_reader.read_u8()?; // Reserved; must be 0
-                let num_imports = tag_reader.read_u16()?;
-                let mut imports = Vec::with_capacity(num_imports as usize);
-                for _ in 0..num_imports {
-                    imports.push(ExportedAsset {
-                        id: tag_reader.read_u16()?,
-                        name: tag_reader.read_str()?,
-                    });
+                let import_assets = tag_reader.read_import_assets_2()?;
+                Tag::ImportAssets {
+                    url: import_assets.0,
+                    imports: import_assets.1,
                 }
-                Tag::ImportAssets { url, imports }
             }
 
             TagCode::JpegTables => {
@@ -1854,6 +1841,37 @@ impl<'a> Reader<'a> {
         Ok(exports)
     }
 
+    pub fn read_import_assets(&mut self) -> Result<(&'a SwfStr, ExportAssets<'a>)> {
+        let url = self.read_str()?;
+        let num_imports = self.read_u16()?;
+        let mut imports = Vec::with_capacity(num_imports as usize);
+        for _ in 0..num_imports {
+            imports.push(ExportedAsset {
+                id: self.read_u16()?,
+                name: self.read_str()?,
+            });
+        }
+
+        Ok((url, imports))
+    }
+
+    pub fn read_import_assets_2(&mut self) -> Result<(&'a SwfStr, ExportAssets<'a>)> {
+        let url = self.read_str()?;
+        self.read_u8()?; // Reserved; must be 1
+        self.read_u8()?; // Reserved; must be 0
+        let num_imports = self.read_u16()?;
+        let mut imports = Vec::with_capacity(num_imports as usize);
+
+        for _ in 0..num_imports {
+            imports.push(ExportedAsset {
+                id: self.read_u16()?,
+                name: self.read_str()?,
+            });
+        }
+
+        Ok((url, imports))
+    }
+
     pub fn read_place_object(&mut self) -> Result<PlaceObject<'a>> {
         Ok(PlaceObject {
             version: 1,
@@ -2155,12 +2173,12 @@ impl<'a> Reader<'a> {
     fn read_convolution_filter(&mut self) -> Result<ConvolutionFilter> {
         let num_matrix_cols = self.read_u8()?;
         let num_matrix_rows = self.read_u8()?;
-        let divisor = self.read_fixed16()?;
-        let bias = self.read_fixed16()?;
+        let divisor = self.read_f32()?;
+        let bias = self.read_f32()?;
         let num_entries = num_matrix_cols * num_matrix_rows;
         let mut matrix = Vec::with_capacity(num_entries as usize);
         for _ in 0..num_entries {
-            matrix.push(self.read_fixed16()?);
+            matrix.push(self.read_f32()?);
         }
         Ok(ConvolutionFilter {
             num_matrix_cols,
@@ -2392,7 +2410,9 @@ impl<'a> Reader<'a> {
                     .ok_or_else(|| Error::invalid_data("Invalid edit text alignment"))?,
                 left_margin: Twips::new(self.read_u16()?.into()),
                 right_margin: Twips::new(self.read_u16()?.into()),
-                indent: Twips::new(self.read_u16()?.into()),
+                // Note: the documentation says that indent is UI16,
+                //       in reality it seems to be SI16.
+                indent: Twips::new(self.read_i16()?.into()),
                 leading: Twips::new(self.read_i16()?.into()),
             }
         } else {
@@ -2496,7 +2516,7 @@ impl<'a> Reader<'a> {
             format,
             width,
             height,
-            data,
+            data: Cow::Borrowed(data),
         })
     }
 
@@ -2555,9 +2575,7 @@ pub fn read_compression_type<R: Read>(mut input: R) -> Result<Compression> {
 #[allow(clippy::unusual_byte_groupings)]
 pub mod tests {
     use super::*;
-    use crate::tag_code::TagCode;
     use crate::test_data;
-    use std::vec::Vec;
 
     fn reader(data: &[u8]) -> Reader<'_> {
         let default_version = 13;
@@ -2800,10 +2818,10 @@ pub mod tests {
         assert_eq!(
             rectangle,
             Rectangle {
-                x_min: Twips::from_pixels(-1.0),
-                y_min: Twips::from_pixels(-1.0),
-                x_max: Twips::from_pixels(1.0),
-                y_max: Twips::from_pixels(1.0),
+                x_min: -Twips::ONE_PX,
+                y_min: -Twips::ONE_PX,
+                x_max: Twips::ONE_PX,
+                y_max: Twips::ONE_PX,
             }
         );
     }
@@ -2817,8 +2835,8 @@ pub mod tests {
             assert_eq!(
                 matrix,
                 Matrix {
-                    tx: Twips::from_pixels(0.0),
-                    ty: Twips::from_pixels(0.0),
+                    tx: Twips::ZERO,
+                    ty: Twips::ZERO,
                     a: Fixed16::ONE,
                     b: Fixed16::ZERO,
                     c: Fixed16::ZERO,
@@ -2920,7 +2938,7 @@ pub mod tests {
         );
 
         let mut matrix = Matrix::IDENTITY;
-        matrix.tx = Twips::from_pixels(1.0);
+        matrix.tx = Twips::ONE_PX;
         let fill_style = FillStyle::Bitmap {
             id: 33,
             matrix,
@@ -2937,7 +2955,7 @@ pub mod tests {
     fn read_line_style() {
         // DefineShape1 and 2 read RGB colors.
         let line_style = LineStyle::new()
-            .with_width(Twips::from_pixels(0.0))
+            .with_width(Twips::ZERO)
             .with_color(Color::from_rgba(0xffff0000));
         assert_eq!(
             reader(&[0, 0, 255, 0, 0]).read_line_style(2).unwrap(),
@@ -3048,8 +3066,8 @@ pub mod tests {
                 b: Fixed16::ZERO,
                 c: Fixed16::ZERO,
                 d: Fixed16::ONE,
-                tx: Twips::from_pixels(0.0),
-                ty: Twips::from_pixels(0.0),
+                tx: Twips::ZERO,
+                ty: Twips::ZERO,
             }),
             color_transform: None,
             ratio: None,

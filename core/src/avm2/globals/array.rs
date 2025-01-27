@@ -3,16 +3,14 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
 use crate::avm2::class::Class;
-use crate::avm2::error::range_error;
+use crate::avm2::error::{make_error_1125, range_error};
 use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{array_allocator, ArrayObject, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::avm2::Multiname;
 use crate::avm2::QName;
 use crate::string::AvmString;
 use bitflags::bitflags;
-use gc_arena::GcCell;
 use std::cmp::{min, Ordering};
 use std::mem::swap;
 
@@ -68,17 +66,14 @@ const PUBLIC_PROTO_METHODS: &[(&str, NativeMethodImpl)] = &[
 /// Implements `Array`'s instance initializer.
 pub fn instance_init<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    activation.super_init(this, &[])?;
+    let this = this.as_object().unwrap();
 
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         if args.len() == 1 {
-            if let Some(expected_len) = args
-                .get(0)
-                .and_then(|v| v.as_number(activation.context.gc_context).ok())
-            {
+            if let Some(expected_len) = args.get(0).filter(|v| v.is_number()).map(|v| v.as_f64()) {
                 if expected_len < 0.0 || expected_len.is_nan() || expected_len.fract() != 0.0 {
                     return Err(Error::AvmError(range_error(
                         activation,
@@ -87,12 +82,6 @@ pub fn instance_init<'gc>(
                         ),
                         1005,
                     )?));
-                }
-
-                // [NA] temporarily limit this. It may not be correct but it's better than 100GB arrays.
-                // TODO: sparse array support
-                if expected_len > (1 << 28) as f64 {
-                    return Err("Ruffle does not support sparse arrays yet.".into());
                 }
 
                 array.set_length(expected_len as usize);
@@ -111,25 +100,26 @@ pub fn instance_init<'gc>(
 
 pub fn class_call<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(activation
+    activation
         .avm2()
         .classes()
         .array
-        .construct(activation, args)?
-        .into())
+        .construct(activation, args)
 }
 
 /// Implements `Array`'s class initializer.
 pub fn class_init<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let scope = activation.create_scopechain();
-    let gc_context = activation.context.gc_context;
+    let gc_context = activation.gc();
     let this_class = this.as_class_object().unwrap();
     let array_proto = this_class.prototype();
 
@@ -141,7 +131,8 @@ pub fn class_init<'gc>(
                 Method::from_builtin(*method, name, gc_context),
                 scope,
                 None,
-                Some(this_class),
+                None,
+                None,
             )
             .into(),
             activation,
@@ -155,9 +146,11 @@ pub fn class_init<'gc>(
 /// Implements `Array.length`'s getter
 pub fn length<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(array) = this.as_array_storage() {
         return Ok(array.length().into());
     }
@@ -168,10 +161,12 @@ pub fn length<'gc>(
 /// Implements `Array.length`'s setter
 pub fn set_length<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         let size = args
             .get(0)
             .unwrap_or(&Value::Undefined)
@@ -186,17 +181,19 @@ pub fn set_length<'gc>(
 pub fn build_array<'gc>(
     activation: &mut Activation<'_, 'gc>,
     array: ArrayStorage<'gc>,
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(ArrayObject::from_storage(activation, array)?.into())
+) -> Value<'gc> {
+    ArrayObject::from_storage(activation, array).into()
 }
 
 /// Implements `Array.concat`
 #[allow(clippy::map_clone)] //You can't clone `Option<Ref<T>>` without it
 pub fn concat<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let mut base_array = this
         .as_array_storage()
         .map(|a| a.clone())
@@ -214,7 +211,7 @@ pub fn concat<'gc>(
         }
     }
 
-    build_array(activation, base_array)
+    Ok(build_array(activation, base_array))
 }
 
 /// Resolves array holes.
@@ -229,8 +226,10 @@ pub fn resolve_array_hole<'gc>(
     }
 
     if let Some(proto) = this.proto() {
+        let proto = Value::from(proto);
+
         proto.get_public_property(
-            AvmString::new_utf8(activation.context.gc_context, i.to_string()),
+            AvmString::new_utf8(activation.gc(), i.to_string()),
             activation,
         )
     } else {
@@ -260,14 +259,14 @@ where
             let item = resolve_array_hole(activation, this, i, item)?;
 
             if matches!(item, Value::Undefined) || matches!(item, Value::Null) {
-                accum.push("".into());
+                accum.push(activation.strings().empty());
             } else {
                 accum.push(conv(item, activation)?.coerce_to_string(activation)?);
             }
         }
 
         return Ok(AvmString::new(
-            activation.context.gc_context,
+            activation.gc(),
             crate::string::join(&accum, &string_separator),
         )
         .into());
@@ -279,32 +278,38 @@ where
 /// Implements `Array.join`
 pub fn join<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     join_inner(activation, this, args, |v, _act| Ok(v))
 }
 
 /// Implements `Array.toString`
 pub fn to_string<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     join_inner(activation, this, &[",".into()], |v, _act| Ok(v))
 }
 
 /// Implements `Array.toLocaleString`
 pub fn to_locale_string<'gc>(
     act: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     join_inner(act, this, &[",".into()], |v, activation| {
-        if let Ok(o) = v.coerce_to_object(activation) {
-            o.call_public_property("toLocaleString", &[], activation)
-        } else {
+        if matches!(v, Value::Null | Value::Undefined) {
             Ok(v)
+        } else {
+            v.call_public_property("toLocaleString", &[], activation)
         }
     })
 }
@@ -349,7 +354,7 @@ impl<'gc> ArrayIter<'gc> {
         start_index: u32,
         end_index: u32,
     ) -> Result<Self, Error<'gc>> {
-        let length = array_object
+        let length = Value::from(array_object)
             .get_public_property("length", activation)?
             .coerce_to_u32(activation)?;
 
@@ -367,22 +372,25 @@ impl<'gc> ArrayIter<'gc> {
     pub fn next(
         &mut self,
         activation: &mut Activation<'_, 'gc>,
-    ) -> Option<Result<(u32, Value<'gc>), Error<'gc>>> {
+    ) -> Result<Option<(u32, Value<'gc>)>, Error<'gc>> {
         if self.index < self.rev_index {
             let i = self.index;
 
             self.index += 1;
 
-            Some(
-                self.array_object
-                    .get_public_property(
-                        AvmString::new_utf8(activation.context.gc_context, i.to_string()),
-                        activation,
-                    )
-                    .map(|val| (i, val)),
-            )
+            let val = self.array_object.get_index_property(i as usize);
+
+            let val = if let Some(storage) = self.array_object.as_vector_storage() {
+                // Special case for Vector- it throws an error if trying to access
+                // an element that was removed
+                val.ok_or_else(|| make_error_1125(activation, i as usize, storage.length()))?
+            } else {
+                val.unwrap_or(Value::Undefined)
+            };
+
+            Ok(Some((i, val)))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -393,22 +401,25 @@ impl<'gc> ArrayIter<'gc> {
     pub fn next_back(
         &mut self,
         activation: &mut Activation<'_, 'gc>,
-    ) -> Option<Result<(u32, Value<'gc>), Error<'gc>>> {
+    ) -> Result<Option<(u32, Value<'gc>)>, Error<'gc>> {
         if self.index < self.rev_index {
             self.rev_index -= 1;
 
             let i = self.rev_index;
 
-            Some(
-                self.array_object
-                    .get_public_property(
-                        AvmString::new_utf8(activation.context.gc_context, i.to_string()),
-                        activation,
-                    )
-                    .map(|val| (i, val)),
-            )
+            let val = self.array_object.get_index_property(i as usize);
+
+            let val = if let Some(storage) = self.array_object.as_vector_storage() {
+                // Special case for Vector- it throws an error if trying to access
+                // an element that was removed
+                val.ok_or_else(|| make_error_1125(activation, i as usize, storage.length()))?
+            } else {
+                val.unwrap_or(Value::Undefined)
+            };
+
+            Ok(Some((i, val)))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -416,21 +427,17 @@ impl<'gc> ArrayIter<'gc> {
 /// Implements `Array.forEach`
 pub fn for_each<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let callback = args
-        .get(0)
-        .cloned()
-        .unwrap_or(Value::Undefined)
-        .as_callable(activation, None, None, false)?;
+    let this = this.as_object().unwrap();
+
+    let callback = args.get(0).cloned().unwrap_or(Value::Undefined);
     let receiver = args.get(1).cloned().unwrap_or(Value::Null);
     let mut iter = ArrayIter::new(activation, this)?;
 
-    while let Some(r) = iter.next(activation) {
-        let (i, item) = r?;
-
-        callback.call(receiver, &[item, i.into(), this.into()], activation)?;
+    while let Some((i, item)) = iter.next(activation)? {
+        callback.call(activation, receiver, &[item, i.into(), this.into()])?;
     }
 
     Ok(Value::Undefined)
@@ -439,47 +446,41 @@ pub fn for_each<'gc>(
 /// Implements `Array.map`
 pub fn map<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let callback = args
-        .get(0)
-        .cloned()
-        .unwrap_or(Value::Undefined)
-        .as_callable(activation, None, None, false)?;
+    let this = this.as_object().unwrap();
+
+    let callback = args.get(0).cloned().unwrap_or(Value::Undefined);
     let receiver = args.get(1).cloned().unwrap_or(Value::Null);
     let mut new_array = ArrayStorage::new(0);
     let mut iter = ArrayIter::new(activation, this)?;
 
-    while let Some(r) = iter.next(activation) {
-        let (i, item) = r?;
-        let new_item = callback.call(receiver, &[item, i.into(), this.into()], activation)?;
+    while let Some((i, item)) = iter.next(activation)? {
+        let new_item = callback.call(activation, receiver, &[item, i.into(), this.into()])?;
 
         new_array.push(new_item);
     }
 
-    build_array(activation, new_array)
+    Ok(build_array(activation, new_array))
 }
 
 /// Implements `Array.filter`
 pub fn filter<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let callback = args
-        .get(0)
-        .cloned()
-        .unwrap_or(Value::Undefined)
-        .as_callable(activation, None, None, false)?;
+    let this = this.as_object().unwrap();
+
+    let callback = args.get(0).cloned().unwrap_or(Value::Undefined);
     let receiver = args.get(1).cloned().unwrap_or(Value::Null);
     let mut new_array = ArrayStorage::new(0);
     let mut iter = ArrayIter::new(activation, this)?;
 
-    while let Some(r) = iter.next(activation) {
-        let (i, item) = r?;
+    while let Some((i, item)) = iter.next(activation)? {
         let is_allowed = callback
-            .call(receiver, &[item, i.into(), this.into()], activation)?
+            .call(activation, receiver, &[item, i.into(), this.into()])?
             .coerce_to_boolean();
 
         if is_allowed {
@@ -487,28 +488,24 @@ pub fn filter<'gc>(
         }
     }
 
-    build_array(activation, new_array)
+    Ok(build_array(activation, new_array))
 }
 
 /// Implements `Array.every`
 pub fn every<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let callback = args
-        .get(0)
-        .cloned()
-        .unwrap_or(Value::Undefined)
-        .as_callable(activation, None, None, false)?;
+    let this = this.as_object().unwrap();
+
+    let callback = args.get(0).cloned().unwrap_or(Value::Undefined);
     let receiver = args.get(1).cloned().unwrap_or(Value::Null);
     let mut iter = ArrayIter::new(activation, this)?;
 
-    while let Some(r) = iter.next(activation) {
-        let (i, item) = r?;
-
+    while let Some((i, item)) = iter.next(activation)? {
         let result = callback
-            .call(receiver, &[item, i.into(), this.into()], activation)?
+            .call(activation, receiver, &[item, i.into(), this.into()])?
             .coerce_to_boolean();
 
         if !result {
@@ -522,22 +519,18 @@ pub fn every<'gc>(
 /// Implements `Array.some`
 pub fn some<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let callback = args
-        .get(0)
-        .cloned()
-        .unwrap_or(Value::Undefined)
-        .as_callable(activation, None, None, false)?;
+    let this = this.as_object().unwrap();
+
+    let callback = args.get(0).cloned().unwrap_or(Value::Undefined);
     let receiver = args.get(1).cloned().unwrap_or(Value::Null);
     let mut iter = ArrayIter::new(activation, this)?;
 
-    while let Some(r) = iter.next(activation) {
-        let (i, item) = r?;
-
+    while let Some((i, item)) = iter.next(activation)? {
         let result = callback
-            .call(receiver, &[item, i.into(), this.into()], activation)?
+            .call(activation, receiver, &[item, i.into(), this.into()])?
             .coerce_to_boolean();
 
         if result {
@@ -551,9 +544,11 @@ pub fn some<'gc>(
 /// Implements `Array.indexOf`
 pub fn index_of<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(array) = this.as_array_storage() {
         let search_val = args.get(0).cloned().unwrap_or(Value::Undefined);
         let from = args
@@ -578,9 +573,11 @@ pub fn index_of<'gc>(
 /// Implements `Array.lastIndexOf`
 pub fn last_index_of<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(array) = this.as_array_storage() {
         let search_val = args.get(0).cloned().unwrap_or(Value::Undefined);
         let from = args
@@ -605,10 +602,12 @@ pub fn last_index_of<'gc>(
 /// Implements `Array.pop`
 pub fn pop<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         return Ok(array.pop());
     }
 
@@ -618,10 +617,12 @@ pub fn pop<'gc>(
 /// Implements `Array.push`
 pub fn push<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         for arg in args {
             array.push(*arg)
         }
@@ -633,10 +634,12 @@ pub fn push<'gc>(
 
 pub fn reverse<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         let mut last_non_hole_index = None;
         for (i, val) in array.iter().enumerate() {
             if val.is_some() {
@@ -668,10 +671,12 @@ pub fn reverse<'gc>(
 /// Implements `Array.shift`
 pub fn shift<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         return Ok(array.shift());
     }
 
@@ -681,10 +686,12 @@ pub fn shift<'gc>(
 /// Implements `Array.unshift`
 pub fn unshift<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         for arg in args.iter().rev() {
             array.unshift(*arg)
         }
@@ -713,9 +720,11 @@ pub fn resolve_index<'gc>(
 /// Implements `Array.slice`
 pub fn slice<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let array_length = this.as_array_storage().map(|a| a.length());
 
     if let Some(array_length) = array_length {
@@ -743,7 +752,7 @@ pub fn slice<'gc>(
             )?);
         }
 
-        return build_array(activation, new_array);
+        return Ok(build_array(activation, new_array));
     }
 
     Ok(Value::Undefined)
@@ -752,9 +761,11 @@ pub fn slice<'gc>(
 /// Implements `Array.splice`
 pub fn splice<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let array_length = this.as_array_storage().map(|a| a.length());
 
     if let Some(array_length) = array_length {
@@ -790,11 +801,11 @@ pub fn splice<'gc>(
 
             let mut resolved_array = ArrayStorage::from_args(&resolved[..]);
 
-            if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+            if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
                 swap(&mut *array, &mut resolved_array)
             }
 
-            return build_array(activation, removed_array);
+            return Ok(build_array(activation, removed_array));
         }
     }
 
@@ -804,7 +815,7 @@ pub fn splice<'gc>(
 /// Insert an element into a specific position of an array.
 pub fn insert_at<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     splice(
@@ -873,38 +884,127 @@ where
     C: FnMut(&mut Activation<'a, 'gc>, Value<'gc>, Value<'gc>) -> Result<Ordering, Error<'gc>>,
 {
     let mut unique_sort_satisfied = true;
-    let mut error_signal = Ok(());
 
-    values.sort_unstable_by(|(_a_index, a), (_b_index, b)| {
+    qsort(values, &mut |(_, a), (_, b)| {
         let unresolved_a = *a;
         let unresolved_b = *b;
 
         if matches!(unresolved_a, Value::Undefined) && matches!(unresolved_b, Value::Undefined) {
             unique_sort_satisfied = false;
-            return Ordering::Equal;
+            return Ok(Ordering::Equal);
         } else if matches!(unresolved_a, Value::Undefined) {
-            return Ordering::Greater;
+            return Ok(Ordering::Greater);
         } else if matches!(unresolved_b, Value::Undefined) {
-            return Ordering::Less;
+            return Ok(Ordering::Less);
         }
 
-        match sort_func(activation, *a, *b) {
-            Ok(Ordering::Equal) => {
+        sort_func(activation, *a, *b).map(|cmp| {
+            if cmp == Ordering::Equal {
                 unique_sort_satisfied = false;
                 Ordering::Equal
+            } else if options.contains(SortOptions::DESCENDING) {
+                cmp.reverse()
+            } else {
+                cmp
             }
-            Ok(v) if options.contains(SortOptions::DESCENDING) => v.reverse(),
-            Ok(v) => v,
-            Err(e) => {
-                error_signal = Err(e);
-                Ordering::Less
-            }
-        }
-    });
-
-    error_signal?;
+        })
+    })?;
 
     Ok(!options.contains(SortOptions::UNIQUE_SORT) || unique_sort_satisfied)
+}
+
+/// A port of the avmplus QuickSort implementation.
+///
+/// This differs from Rust's `slice::sort` in the following way:
+/// - the comparison function is faillible and can return an error, short-circuiting the sort;
+/// - the comparison function isn't required to define a valid total order: in such cases, the sort
+///   will permute the slice arbitrarily, but won't return an error.
+///
+/// Original code: https://github.com/adobe/avmplus/blob/master/core/ArrayClass.cpp#L637
+///
+/// NOTE: this is `pub(super)` so it can be called by `vector::sort`.
+pub(super) fn qsort<T, E>(
+    slice: &mut [T],
+    cmp: &mut impl FnMut(&T, &T) -> Result<Ordering, E>,
+) -> Result<(), E> {
+    match slice {
+        // Empty and one-element slices are trivially sorted.
+        [] | [_] => return Ok(()),
+        // Fast-path for two elements.
+        [a, b] => {
+            if cmp(a, b)?.is_gt() {
+                swap(a, b);
+            }
+            return Ok(());
+        }
+        // Fast-path for three elements.
+        [a, b, c] => {
+            if cmp(a, b)?.is_gt() {
+                swap(a, b);
+            }
+            if cmp(b, c)?.is_gt() {
+                swap(b, c);
+                if cmp(a, b)?.is_gt() {
+                    swap(a, b);
+                }
+            }
+            return Ok(());
+        }
+        _ => (),
+    }
+
+    // Select the middle element of the slice as the pivot, and put it at the beginning.
+    slice.swap(0, slice.len() / 2);
+
+    // Order the elements (excluding the pivot) such that all elements lower
+    // than the pivot come before all elements greater than the pivot.
+    //
+    // This is done by iterating from both ends, swapping greater elements with
+    // lower ones along the way.
+    let mut left = 0;
+    let mut right = slice.len();
+    loop {
+        // Find an element greater than the pivot from the left.
+        loop {
+            left += 1;
+            if left >= slice.len() || cmp(&slice[left], &slice[0])?.is_gt() {
+                break;
+            }
+        }
+
+        // Find an element lower than the pivot from the right.
+        loop {
+            right -= 1;
+            if right == 0 || cmp(&slice[right], &slice[0])?.is_lt() {
+                break;
+            }
+        }
+
+        // Nothing left to swap, we are done.
+        if right < left {
+            break;
+        }
+
+        // Otherwise, swap left and right, and keep going.
+        slice.swap(left, right);
+    }
+
+    // Put the pivot in its final position.
+    slice.swap(0, right);
+
+    // The elements are now ordered as follows:
+    // [..right]: lower partition
+    // [right..left]: middle partition (equal to pivot)
+    // [left..]: higher partition
+
+    // Recurse into both higher and lower partitions, with the smallest first.
+    let (mut fst, mut snd) = slice.split_at_mut(left);
+    fst = &mut fst[..right];
+    if fst.len() >= snd.len() {
+        swap(&mut fst, &mut snd);
+    }
+    qsort(fst, cmp)?;
+    qsort(snd, cmp)
 }
 
 pub fn compare_string_case_sensitive<'gc>(
@@ -958,14 +1058,14 @@ fn sort_postprocess<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if unique_satisfied {
         if options.contains(SortOptions::RETURN_INDEXED_ARRAY) {
-            return build_array(
+            return Ok(build_array(
                 activation,
                 ArrayStorage::from_storage(
                     values.iter().map(|(i, _v)| Some((*i).into())).collect(),
                 ),
-            );
+            ));
         } else {
-            if let Some(mut old_array) = this.as_array_storage_mut(activation.context.gc_context) {
+            if let Some(mut old_array) = this.as_array_storage_mut(activation.gc()) {
                 let new_vec = values
                     .iter()
                     .map(|(src, v)| {
@@ -1020,17 +1120,14 @@ fn extract_array_values<'gc>(
 /// Impl `Array.sort`
 pub fn sort<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let (compare_fnc, options) = if args.len() > 1 {
         (
-            Some(
-                args.get(0)
-                    .cloned()
-                    .unwrap_or(Value::Undefined)
-                    .as_callable(activation, None, None, false)?,
-            ),
+            Some(args.get(0).cloned().unwrap_or(Value::Undefined)),
             SortOptions::from_bits_truncate(
                 args.get(1)
                     .cloned()
@@ -1040,8 +1137,11 @@ pub fn sort<'gc>(
         )
     } else {
         let arg = args.get(0).cloned().unwrap_or(Value::Undefined);
-        if let Ok(callable) = arg.as_callable(activation, None, None, false) {
-            (Some(callable), SortOptions::empty())
+        if let Some(callable) = arg
+            .as_object()
+            .filter(|o| o.as_class_object().is_some() || o.as_function_object().is_some())
+        {
+            (Some(callable.into()), SortOptions::empty())
         } else {
             (
                 None,
@@ -1067,7 +1167,7 @@ pub fn sort<'gc>(
             options,
             constrain(|activation, a, b| {
                 let order = v
-                    .call(this.into(), &[a, b], activation)?
+                    .call(activation, this.into(), &[a, b])?
                     .coerce_to_number(activation)?;
 
                 if order > 0.0 {
@@ -1112,23 +1212,24 @@ fn extract_maybe_array_values<'gc>(
     Ok(extract_array_values(activation, value)?.unwrap_or_else(|| vec![value]))
 }
 
-/// Given a value, extract its array values and coerce them to strings.
-///
-/// If the value is not an array, it will be returned as if it was present in a
-/// one-element array containing itself. This is intended for use with parsing
-/// parameters which are optionally arrays. The returned value will still be
-/// coerced into a string in this case.
-fn extract_maybe_array_strings<'gc>(
+/// If called with sortOn(Array), yields vec of stringified elements.
+/// If called with sortOn(String), yields this one string.
+/// Otherwise, yields an empty vec.
+fn extract_field_names<'gc>(
     activation: &mut Activation<'_, 'gc>,
     value: Value<'gc>,
 ) -> Result<Vec<AvmString<'gc>>, Error<'gc>> {
-    let values = extract_maybe_array_values(activation, value)?;
-
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        out.push(value.coerce_to_string(activation)?);
+    if let Some(values) = extract_array_values(activation, value)? {
+        let mut out = Vec::with_capacity(values.len());
+        for value in values {
+            out.push(value.coerce_to_string(activation)?);
+        }
+        Ok(out)
+    } else if let Value::String(s) = value {
+        Ok(vec![s])
+    } else {
+        Ok(vec![])
     }
-    Ok(out)
 }
 
 /// Given a value, extract its array values and coerce them to SortOptions.
@@ -1155,11 +1256,13 @@ fn extract_maybe_array_sort_options<'gc>(
 /// Impl `Array.sortOn`
 pub fn sort_on<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(field_names_value) = args.get(0).cloned() {
-        let field_names = extract_maybe_array_strings(activation, field_names_value)?;
+        let field_names = extract_field_names(activation, field_names_value)?;
         let mut options = extract_maybe_array_sort_options(
             activation,
             args.get(1).cloned().unwrap_or_else(|| 0.into()),
@@ -1194,10 +1297,10 @@ pub fn sort_on<'gc>(
                     // if the object is null/undefined or does not have the field,
                     // it's treated as if the field's value was undefined.
                     // TODO: verify this and fix it
-                    let a_object = a.coerce_to_object(activation)?;
+                    let a_object = a.null_check(activation, None)?;
                     let a_field = a_object.get_public_property(*field_name, activation)?;
 
-                    let b_object = b.coerce_to_object(activation)?;
+                    let b_object = b.null_check(activation, None)?;
                     let b_field = b_object.get_public_property(*field_name, activation)?;
 
                     let ord = if options.contains(SortOptions::NUMERIC) {
@@ -1232,10 +1335,12 @@ pub fn sort_on<'gc>(
 /// Implements `Array.removeAt`
 pub fn remove_at<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut array) = this.as_array_storage_mut(activation.context.gc_context) {
+    let this = this.as_object().unwrap();
+
+    if let Some(mut array) = this.as_array_storage_mut(activation.gc()) {
         let index = args
             .get(0)
             .cloned()
@@ -1249,35 +1354,37 @@ pub fn remove_at<'gc>(
 }
 
 /// Construct `Array`'s class.
-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
-    let mc = activation.context.gc_context;
+pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+    let mc = activation.gc();
     let class = Class::new(
-        QName::new(activation.avm2().public_namespace, "Array"),
-        Some(Multiname::new(activation.avm2().public_namespace, "Object")),
+        QName::new(activation.avm2().namespaces.public_all(), "Array"),
+        Some(activation.avm2().class_defs().object),
         Method::from_builtin(instance_init, "<Array instance initializer>", mc),
         Method::from_builtin(class_init, "<Array class initializer>", mc),
+        activation.avm2().class_defs().class,
         mc,
     );
 
-    let mut write = class.write(mc);
-
-    write.set_instance_allocator(array_allocator);
-    write.set_call_handler(Method::from_builtin(class_call, "<Array call handler>", mc));
+    class.set_instance_allocator(mc, array_allocator);
+    class.set_call_handler(
+        mc,
+        Method::from_builtin(class_call, "<Array call handler>", mc),
+    );
 
     const PUBLIC_INSTANCE_PROPERTIES: &[(
         &str,
         Option<NativeMethodImpl>,
         Option<NativeMethodImpl>,
     )] = &[("length", Some(length), Some(set_length))];
-    write.define_builtin_instance_properties(
+    class.define_builtin_instance_properties(
         mc,
-        activation.avm2().public_namespace,
+        activation.avm2().namespaces.public_all(),
         PUBLIC_INSTANCE_PROPERTIES,
     );
 
-    write.define_builtin_instance_methods(
+    class.define_builtin_instance_methods(
         mc,
-        activation.avm2().as3_namespace,
+        activation.avm2().namespaces.as3,
         PUBLIC_AS3_INSTANCE_METHODS,
     );
 
@@ -1294,18 +1401,30 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
         ),
         ("UNIQUESORT", SortOptions::UNIQUE_SORT.bits() as u32),
     ];
-    write.define_constant_uint_class_traits(
-        activation.avm2().public_namespace,
+    class.define_constant_uint_class_traits(
+        activation.avm2().namespaces.public_all(),
         CONSTANTS_UINT,
         activation,
     );
 
     const CONSTANTS_INT: &[(&str, i32)] = &[("length", 1)];
-    write.define_constant_int_class_traits(
-        activation.avm2().public_namespace,
+    class.define_constant_int_class_traits(
+        activation.avm2().namespaces.public_all(),
         CONSTANTS_INT,
         activation,
     );
+
+    class.mark_traits_loaded(activation.gc());
+    class
+        .init_vtable(activation.context)
+        .expect("Native class's vtable should initialize");
+
+    let c_class = class.c_class().expect("Class::new returns an i_class");
+
+    c_class.mark_traits_loaded(activation.gc());
+    c_class
+        .init_vtable(activation.context)
+        .expect("Native class's vtable should initialize");
 
     class
 }

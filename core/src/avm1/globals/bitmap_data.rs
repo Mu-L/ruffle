@@ -12,8 +12,8 @@ use crate::bitmap::bitmap_data::{BitmapDataDrawError, IBitmapDrawable};
 use crate::bitmap::bitmap_data::{ChannelOptions, ThresholdOperation};
 use crate::bitmap::{is_size_valid, operations};
 use crate::character::Character;
-use crate::context::GcContext;
 use crate::display_object::DisplayObject;
+use crate::string::StringContext;
 use crate::swf::BlendMode;
 use crate::{avm1_stub, avm_error};
 use gc_arena::{GcCell, Mutation};
@@ -105,9 +105,9 @@ fn constructor<'gc>(
 
     let bitmap_data = BitmapData::new(width, height, transparency, fill_color);
     this.set_native(
-        activation.context.gc_context,
+        activation.gc(),
         NativeObject::BitmapData(BitmapDataWrapper::new(GcCell::new(
-            activation.context.gc_context,
+            activation.gc(),
             bitmap_data,
         ))),
     );
@@ -191,7 +191,8 @@ fn get_pixel<'gc>(
                 let x = x_val.coerce_to_u32(activation)?;
                 let y = y_val.coerce_to_u32(activation)?;
                 // AVM1 returns a signed int, so we need to convert it.
-                let col = operations::get_pixel(bitmap_data, x, y) as i32;
+                let col =
+                    operations::get_pixel(bitmap_data, activation.context.renderer, x, y) as i32;
                 return Ok(col.into());
             }
         }
@@ -211,7 +212,8 @@ fn get_pixel32<'gc>(
                 let x = x_val.coerce_to_u32(activation)?;
                 let y = y_val.coerce_to_u32(activation)?;
                 // AVM1 returns a signed int, so we need to convert it.
-                let col = operations::get_pixel32(bitmap_data, x, y) as i32;
+                let col =
+                    operations::get_pixel32(bitmap_data, activation.context.renderer, x, y) as i32;
                 return Ok(col.into());
             }
         }
@@ -235,7 +237,8 @@ fn set_pixel<'gc>(
                 let color = color_val.coerce_to_u32(activation)?;
 
                 operations::set_pixel(
-                    activation.context.gc_context,
+                    activation.gc(),
+                    activation.context.renderer,
                     bitmap_data,
                     x,
                     y,
@@ -264,7 +267,14 @@ fn set_pixel32<'gc>(
                 let y = y_val.coerce_to_u32(activation)?;
                 let color = color_val.coerce_to_u32(activation)?;
 
-                operations::set_pixel32(activation.context.gc_context, bitmap_data, x, y, color);
+                operations::set_pixel32(
+                    activation.gc(),
+                    activation.context.renderer,
+                    bitmap_data,
+                    x,
+                    y,
+                    color,
+                );
             }
 
             return Ok(Value::Undefined);
@@ -325,7 +335,8 @@ fn copy_channel<'gc>(
                     .coerce_to_i32(activation)?;
 
                 operations::copy_channel(
-                    activation.context.gc_context,
+                    activation.gc(),
+                    activation.context.renderer,
                     bitmap_data,
                     (min_x, min_y),
                     (src_min_x, src_min_y, src_width, src_height),
@@ -367,7 +378,8 @@ fn fill_rect<'gc>(
                     .coerce_to_i32(activation)?;
 
                 operations::fill_rect(
-                    activation.context.gc_context,
+                    activation.gc(),
+                    activation.context.renderer,
                     bitmap_data,
                     x,
                     y,
@@ -391,9 +403,9 @@ fn clone<'gc>(
     if let NativeObject::BitmapData(bitmap_data) = this.native() {
         if !bitmap_data.disposed() {
             return Ok(new_bitmap_data(
-                activation.context.gc_context,
+                activation.gc(),
                 this.get_local_stored("__proto__", activation, false),
-                bitmap_data.clone_data(),
+                bitmap_data.clone_data(activation.context.renderer),
             )
             .into());
         }
@@ -409,7 +421,7 @@ fn dispose<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let NativeObject::BitmapData(bitmap_data) = this.native() {
         if !bitmap_data.disposed() {
-            bitmap_data.dispose(activation.context.gc_context);
+            bitmap_data.dispose(activation.gc());
             return Ok(Value::Undefined);
         }
     }
@@ -431,7 +443,14 @@ fn flood_fill<'gc>(
                 let y = y_val.coerce_to_u32(activation)?;
                 let color = color_val.coerce_to_u32(activation)?;
 
-                operations::flood_fill(activation.context.gc_context, bitmap_data, x, y, color);
+                operations::flood_fill(
+                    activation.gc(),
+                    activation.context.renderer,
+                    bitmap_data,
+                    x,
+                    y,
+                    color,
+                );
             }
             return Ok(Value::Undefined);
         }
@@ -468,7 +487,7 @@ fn noise<'gc>(
             if let Some(random_seed_val) = args.get(0) {
                 let random_seed = random_seed_val.coerce_to_i32(activation)?;
                 operations::noise(
-                    activation.context.gc_context,
+                    activation.gc(),
                     bitmap_data,
                     random_seed,
                     low,
@@ -543,7 +562,7 @@ fn draw<'gc>(
             // if we're actually going to draw something.
             let quality = activation.context.stage.quality();
             match operations::draw(
-                &mut activation.context,
+                activation.context,
                 bitmap_data,
                 source,
                 Transform {
@@ -621,11 +640,11 @@ fn apply_filter<'gc>(
                 .get(3)
                 .unwrap_or(&Value::Undefined)
                 .coerce_to_object(activation);
-            let filter = bitmap_filter::avm1_to_filter(filter_object, &mut activation.context);
+            let filter = bitmap_filter::avm1_to_filter(filter_object, activation.context);
 
             if let Some(filter) = filter {
                 operations::apply_filter(
-                    &mut activation.context,
+                    activation.context,
                     bitmap_data,
                     source,
                     (src_min_x, src_min_y),
@@ -686,7 +705,8 @@ fn color_transform<'gc>(
                 };
 
                 operations::color_transform(
-                    activation.context.gc_context,
+                    activation.gc(),
+                    activation.context.renderer,
                     bitmap_data,
                     x_min,
                     y_min,
@@ -717,8 +737,13 @@ fn get_color_bounds_rect<'gc>(
                 let mask = mask_val.coerce_to_u32(activation)?;
                 let color = color_val.coerce_to_u32(activation)?;
 
-                let (x, y, w, h) =
-                    operations::color_bounds_rect(bitmap_data, find_color, mask, color);
+                let (x, y, w, h) = operations::color_bounds_rect(
+                    activation.context.renderer,
+                    bitmap_data,
+                    find_color,
+                    mask,
+                    color,
+                );
 
                 let proto = activation.context.avm1.prototypes().rectangle_constructor;
                 let rect =
@@ -790,7 +815,7 @@ fn perlin_noise<'gc>(
             let octave_offsets = octave_offsets?;
 
             operations::perlin_noise(
-                activation.context.gc_context,
+                activation.gc(),
                 bitmap_data,
                 (base_x, base_y),
                 num_octaves,
@@ -865,6 +890,7 @@ fn hit_test<'gc>(
                     .clamp(0, u8::MAX.into()) as u8;
 
                 let result = operations::hit_test_bitmapdata(
+                    activation.context.renderer,
                     bitmap_data,
                     top_left,
                     source_threshold,
@@ -890,6 +916,7 @@ fn hit_test<'gc>(
                             test_y.coerce_to_i32(activation)? - top_left.1,
                         );
                         return Ok(Value::Bool(operations::hit_test_point(
+                            activation.context.renderer,
                             bitmap_data,
                             source_threshold,
                             test_point,
@@ -907,6 +934,7 @@ fn hit_test<'gc>(
                             test_height.coerce_to_i32(activation)?,
                         );
                         return Ok(Value::Bool(operations::hit_test_rectangle(
+                            activation.context.renderer,
                             bitmap_data,
                             source_threshold,
                             test_point,
@@ -1000,7 +1028,7 @@ fn copy_pixels<'gc>(
                                 as i32;
 
                             operations::copy_pixels_with_alpha_source(
-                                &mut activation.context,
+                                activation.context,
                                 bitmap_data,
                                 src_bitmap,
                                 (src_min_x, src_min_y, src_width, src_height),
@@ -1012,7 +1040,7 @@ fn copy_pixels<'gc>(
                         }
                     } else {
                         operations::copy_pixels(
-                            &mut activation.context,
+                            activation.context,
                             bitmap_data,
                             src_bitmap,
                             (src_min_x, src_min_y, src_width, src_height),
@@ -1093,7 +1121,8 @@ fn merge<'gc>(
             if let NativeObject::BitmapData(src_bitmap) = source_bitmap.native() {
                 if !src_bitmap.disposed() {
                     operations::merge(
-                        activation.context.gc_context,
+                        activation.gc(),
+                        activation.context.renderer,
                         bitmap_data,
                         src_bitmap,
                         (src_min_x, src_min_y, src_width, src_height),
@@ -1172,7 +1201,8 @@ fn palette_map<'gc>(
             if let NativeObject::BitmapData(src_bitmap) = source_bitmap.native() {
                 if !src_bitmap.disposed() {
                     operations::palette_map(
-                        activation.context.gc_context,
+                        activation.gc(),
+                        activation.context.renderer,
                         bitmap_data,
                         src_bitmap,
                         (src_min_x, src_min_y, src_width, src_height),
@@ -1249,7 +1279,8 @@ fn pixel_dissolve<'gc>(
                     };
 
                     return Ok(operations::pixel_dissolve(
-                        activation.context.gc_context,
+                        activation.gc(),
+                        activation.context.renderer,
                         bitmap_data,
                         src_bitmap_data,
                         (src_min_x, src_min_y, src_width, src_height),
@@ -1283,7 +1314,13 @@ fn scroll<'gc>(
                 .unwrap_or(&Value::Undefined)
                 .coerce_to_i32(activation)?;
 
-            operations::scroll(activation.context.gc_context, bitmap_data, x, y);
+            operations::scroll(
+                activation.gc(),
+                activation.context.renderer,
+                bitmap_data,
+                x,
+                y,
+            );
 
             return Ok(Value::Undefined);
         }
@@ -1360,7 +1397,8 @@ fn threshold<'gc>(
             if let NativeObject::BitmapData(src_bitmap) = source_bitmap.native() {
                 if !src_bitmap.disposed() {
                     let modified_count = operations::threshold(
-                        activation.context.gc_context,
+                        activation.gc(),
+                        activation.context.renderer,
                         bitmap_data,
                         src_bitmap,
                         (src_min_x, src_min_y, src_width, src_height),
@@ -1425,9 +1463,13 @@ fn compare<'gc>(
         return Ok(DIFFERENT_HEIGHTS.into());
     }
 
-    match operations::compare(this_bitmap_data, other_bitmap_data) {
+    match operations::compare(
+        activation.context.renderer,
+        this_bitmap_data,
+        other_bitmap_data,
+    ) {
         Some(bitmap_data) => Ok(new_bitmap_data(
-            activation.context.gc_context,
+            activation.gc(),
             this.get_local_stored("__proto__", activation, false),
             bitmap_data,
         )
@@ -1456,19 +1498,23 @@ fn load_bitmap<'gc>(
         .library_for_movie(movie)
         .and_then(|l| l.character_by_export_name(name));
 
-    let Some(Character::Bitmap(bitmap)) = character else {
+    let Some((_id, Character::Bitmap { compressed, .. })) = character else {
         return Ok(Value::Undefined);
     };
+    let bitmap = compressed.decode().unwrap();
 
     let transparency = true;
     let bitmap_data = BitmapData::new_with_pixels(
-        bitmap.width().into(),
-        bitmap.height().into(),
+        bitmap.width(),
+        bitmap.height(),
         transparency,
-        bitmap.bitmap_data().read().pixels().to_vec(),
+        bitmap
+            .as_colors()
+            .map(crate::bitmap::bitmap_data::Color::from)
+            .collect(),
     );
     Ok(new_bitmap_data(
-        activation.context.gc_context,
+        activation.gc(),
         this.get_local_stored("prototype", activation, false),
         bitmap_data,
     )
@@ -1476,14 +1522,14 @@ fn load_bitmap<'gc>(
 }
 
 pub fn create_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: ScriptObject<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     define_properties_on(PROTO_DECLS, context, proto, fn_proto);
 
     let bitmap_data_constructor = FunctionObject::constructor(
-        context.gc_context,
+        context.gc(),
         Executable::Native(constructor),
         constructor_to_fn!(constructor),
         fn_proto,

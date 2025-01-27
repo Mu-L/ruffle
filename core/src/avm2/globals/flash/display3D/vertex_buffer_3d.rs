@@ -1,7 +1,6 @@
+use crate::avm2::activation::Activation;
+use crate::avm2::object::{ClassObject, TObject};
 use crate::avm2::parameters::ParametersExt;
-use crate::avm2::Activation;
-use crate::avm2::ClassObject;
-use crate::avm2::TObject;
 use crate::avm2::Value;
 use crate::avm2::{Error, Object};
 
@@ -14,18 +13,17 @@ pub fn vertex_buffer_3d_allocator<'gc>(
 
 pub fn upload_from_byte_array<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(vertex_buffer) = this.as_vertex_buffer() {
-        let byte_array = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_object(activation)?;
+        let byte_array = args.get_object(activation, 0, "data")?;
 
         let byte_array = byte_array
             .as_bytearray()
-            .ok_or_else(|| Error::from("ArgumentError: Parameter must be a ByteArray"))?;
+            .expect("Parameter must be a ByteArray");
 
         let byte_offset = args.get_u32(activation, 1)?;
         let start_vertex = args.get_u32(activation, 2)?;
@@ -51,18 +49,17 @@ pub fn upload_from_byte_array<'gc>(
 
 pub fn upload_from_vector<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(vertex_buffer) = this.as_vertex_buffer() {
-        let vector = args
-            .get(0)
-            .unwrap_or(&Value::Undefined)
-            .coerce_to_object(activation)?;
+        let vector = args.get_object(activation, 0, "data")?;
 
         let vector = vector
             .as_vector_storage()
-            .ok_or_else(|| Error::from("ArgumentError: Parameter must be a Vector"))?;
+            .expect("Parameter must be a Vector");
 
         let start_vertex = args.get_u32(activation, 1)?;
         let num_vertices = args.get_u32(activation, 2)?;

@@ -5,26 +5,16 @@ use swf::Twips;
 
 use crate::avm2::activation::Activation;
 use crate::avm2::error::{argument_error, make_error_2025, range_error};
-use crate::avm2::object::{Object, TObject};
+use crate::avm2::globals::slots::flash_geom_point as point_slots;
+use crate::avm2::object::TObject;
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::{ArrayObject, ArrayStorage, Error};
+use crate::avm2_stub_method;
 use crate::context::UpdateContext;
 use crate::display_object::HitTestOptions;
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
-use crate::{avm2_stub_getter, avm2_stub_method, avm2_stub_setter};
 use std::cmp::min;
-
-/// Implements `flash.display.DisplayObjectContainer`'s native instance constructor.
-pub fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    activation.super_init(this, &[])?;
-
-    Ok(Value::Undefined)
-}
 
 /// Validate if we can add a child to a parent at a given index.
 ///
@@ -40,13 +30,21 @@ fn validate_add_operation<'gc>(
 ) -> Result<(), Error<'gc>> {
     let ctr = new_parent
         .as_container()
-        .ok_or("ArgumentError: Parent is not a DisplayObjectContainer")?;
+        .expect("Parent must be a DisplayObjectContainer");
 
     if let DisplayObject::Stage(_) = proposed_child {
         return Err(Error::AvmError(argument_error(
             activation,
             "Error #3783: A Stage object cannot be added as the child of another object.",
             3783,
+        )?));
+    }
+
+    if !proposed_child.movie().is_action_script_3() {
+        return Err(Error::AvmError(argument_error(
+            activation,
+            "Error #2180: It is illegal to move AVM1 content (AS1 or AS2) to a different part of the displayList when it has been loaded into AVM2 (AS3) content.",
+            2180,
         )?));
     }
 
@@ -96,7 +94,7 @@ fn validate_remove_operation<'gc>(
 ) -> Result<(), Error<'gc>> {
     let old_ctr = old_parent
         .as_container()
-        .ok_or("ArgumentError: Parent is not a DisplayObjectContainer")?;
+        .expect("Parent must be a DisplayObjectContainer");
 
     for child in old_ctr.iter_render_list() {
         if DisplayObject::ptr_eq(child, proposed_child) {
@@ -108,13 +106,10 @@ fn validate_remove_operation<'gc>(
 }
 
 /// Remove an element from it's parent display list.
-fn remove_child_from_displaylist<'gc>(
-    context: &mut UpdateContext<'_, 'gc>,
-    child: DisplayObject<'gc>,
-) {
+fn remove_child_from_displaylist<'gc>(context: &mut UpdateContext<'gc>, child: DisplayObject<'gc>) {
     if let Some(parent) = child.parent() {
         if let Some(mut ctr) = parent.as_container() {
-            child.set_placed_by_script(context.gc_context, true);
+            child.set_placed_by_script(context.gc(), true);
             ctr.remove_child(context, child);
         }
     }
@@ -122,13 +117,13 @@ fn remove_child_from_displaylist<'gc>(
 
 /// Add the `child` to `parent`'s display list.
 pub(super) fn add_child_to_displaylist<'gc>(
-    context: &mut UpdateContext<'_, 'gc>,
+    context: &mut UpdateContext<'gc>,
     parent: DisplayObject<'gc>,
     child: DisplayObject<'gc>,
     index: usize,
 ) {
     if let Some(mut ctr) = parent.as_container() {
-        child.set_placed_by_script(context.gc_context, true);
+        child.set_placed_by_script(context.gc(), true);
         ctr.insert_at_index(context, child, index);
     }
 }
@@ -136,9 +131,11 @@ pub(super) fn add_child_to_displaylist<'gc>(
 /// Implements `DisplayObjectContainer.getChildAt`
 pub fn get_child_at<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(dobj) = this
         .as_display_object()
         .and_then(|this| this.as_container())
@@ -162,9 +159,11 @@ pub fn get_child_at<'gc>(
 /// Implements `DisplayObjectContainer.getChildByName`
 pub fn get_child_by_name<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(dobj) = this
         .as_display_object()
         .and_then(|this| this.as_container())
@@ -173,7 +172,6 @@ pub fn get_child_by_name<'gc>(
         if let Some(child) = dobj.child_by_name(&name, false) {
             return Ok(child.object2());
         } else {
-            tracing::warn!("Display object container has no child with name {}", name);
             return Ok(Value::Null);
         }
     }
@@ -184,20 +182,22 @@ pub fn get_child_by_name<'gc>(
 /// Implements `DisplayObjectContainer.addChild`
 pub fn add_child<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(ctr) = parent.as_container() {
             let child = args
                 .get_object(activation, 0, "child")?
                 .as_display_object()
-                .ok_or("ArgumentError: Child not a valid display object")?;
+                .expect("Child must be a display object");
 
             let target_index = ctr.num_children();
 
             validate_add_operation(activation, parent, child, target_index)?;
-            add_child_to_displaylist(&mut activation.context, parent, child, target_index);
+            add_child_to_displaylist(activation.context, parent, child, target_index);
 
             return Ok(child.object2());
         }
@@ -209,18 +209,20 @@ pub fn add_child<'gc>(
 /// Implements `DisplayObjectContainer.addChildAt`
 pub fn add_child_at<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         let child = args
             .get_object(activation, 0, "child")?
             .as_display_object()
-            .ok_or("ArgumentError: Child not a valid display object")?;
+            .expect("Child must be a display object");
         let target_index = args.get_u32(activation, 1)? as usize;
 
         validate_add_operation(activation, parent, child, target_index)?;
-        add_child_to_displaylist(&mut activation.context, parent, child, target_index);
+        add_child_to_displaylist(activation.context, parent, child, target_index);
 
         return Ok(child.object2());
     }
@@ -231,17 +233,19 @@ pub fn add_child_at<'gc>(
 /// Implements `DisplayObjectContainer.removeChild`
 pub fn remove_child<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         let child = args
             .get_object(activation, 0, "child")?
             .as_display_object()
-            .ok_or("ArgumentError: Child not a valid display object")?;
+            .expect("Child must be a display object");
 
         validate_remove_operation(activation, parent, child)?;
-        remove_child_from_displaylist(&mut activation.context, child);
+        remove_child_from_displaylist(activation.context, child);
 
         return Ok(child.object2());
     }
@@ -252,9 +256,11 @@ pub fn remove_child<'gc>(
 /// Implements `DisplayObjectContainer.numChildren`
 pub fn get_num_children<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this
         .as_display_object()
         .and_then(|this| this.as_container())
@@ -268,9 +274,11 @@ pub fn get_num_children<'gc>(
 /// Implements `DisplayObjectContainer.contains`
 pub fn contains<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if parent.as_container().is_some() {
             if let Some(child) = args.get_object(activation, 0, "child")?.as_display_object() {
@@ -292,9 +300,11 @@ pub fn contains<'gc>(
 /// Implements `DisplayObjectContainer.getChildIndex`
 pub fn get_child_index<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(ctr) = parent.as_container() {
             let target_child = args.get_object(activation, 0, "child")?.as_display_object();
@@ -315,9 +325,11 @@ pub fn get_child_index<'gc>(
 /// Implements `DisplayObjectContainer.removeChildAt`
 pub fn remove_child_at<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(mut ctr) = parent.as_container() {
             let target_child = args.get_i32(activation, 0)?;
@@ -336,9 +348,9 @@ pub fn remove_child_at<'gc>(
             }
 
             let child = ctr.child_by_index(target_child as usize).unwrap();
-            child.set_placed_by_script(activation.context.gc_context, true);
+            child.set_placed_by_script(activation.gc(), true);
 
-            ctr.remove_child(&mut activation.context, child);
+            ctr.remove_child(activation.context, child);
 
             return Ok(child.object2());
         }
@@ -350,9 +362,11 @@ pub fn remove_child_at<'gc>(
 /// Implements `DisplayObjectContainer.removeChildren`
 pub fn remove_children<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(mut ctr) = parent.as_container() {
             let from = args.get_i32(activation, 0)?;
@@ -398,7 +412,7 @@ pub fn remove_children<'gc>(
             }
 
             ctr.remove_range(
-                &mut activation.context,
+                activation.context,
                 from as usize..min(ctr.num_children(), to as usize + 1),
             );
         }
@@ -410,14 +424,16 @@ pub fn remove_children<'gc>(
 /// Implements `DisplayObjectContainer.setChildIndex`
 pub fn set_child_index<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         let child = args
             .get_object(activation, 0, "child")?
             .as_display_object()
-            .ok_or("ArgumentError: Child not a valid display object")?;
+            .expect("Child must be a display object");
         let target_index = args.get_u32(activation, 1)? as usize;
 
         let child_parent = child.parent();
@@ -426,7 +442,7 @@ pub fn set_child_index<'gc>(
         }
 
         validate_add_operation(activation, parent, child, target_index)?;
-        add_child_to_displaylist(&mut activation.context, parent, child, target_index);
+        add_child_to_displaylist(activation.context, parent, child, target_index);
 
         return Ok(child.object2());
     }
@@ -437,9 +453,11 @@ pub fn set_child_index<'gc>(
 /// Implements `DisplayObjectContainer.swapChildrenAt`
 pub fn swap_children_at<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(mut ctr) = parent.as_container() {
             let index0 = args.get_i32(activation, 0)?;
@@ -467,10 +485,10 @@ pub fn swap_children_at<'gc>(
             let child0 = ctr.child_by_index(index0 as usize).unwrap();
             let child1 = ctr.child_by_index(index1 as usize).unwrap();
 
-            child0.set_placed_by_script(activation.context.gc_context, true);
-            child1.set_placed_by_script(activation.context.gc_context, true);
+            child0.set_placed_by_script(activation.gc(), true);
+            child1.set_placed_by_script(activation.gc(), true);
 
-            ctr.swap_at_index(&mut activation.context, index0 as usize, index1 as usize);
+            ctr.swap_at_index(activation.context, index0 as usize, index1 as usize);
         }
     }
 
@@ -480,19 +498,21 @@ pub fn swap_children_at<'gc>(
 /// Implements `DisplayObjectContainer.swapChildren`
 pub fn swap_children<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(mut ctr) = parent.as_container() {
             let child0 = args
                 .get_object(activation, 0, "child")?
                 .as_display_object()
-                .ok_or("ArgumentError: Child is not a display object")?;
+                .expect("Child must be a display object");
             let child1 = args
                 .get_object(activation, 1, "child")?
                 .as_display_object()
-                .ok_or("ArgumentError: Child is not a display object")?;
+                .expect("Child must be a display object");
 
             let index0 = ctr
                 .iter_render_list()
@@ -503,10 +523,10 @@ pub fn swap_children<'gc>(
                 .position(|a| DisplayObject::ptr_eq(a, child1))
                 .ok_or(make_error_2025(activation))?;
 
-            child0.set_placed_by_script(activation.context.gc_context, true);
-            child1.set_placed_by_script(activation.context.gc_context, true);
+            child0.set_placed_by_script(activation.gc(), true);
+            child1.set_placed_by_script(activation.gc(), true);
 
-            ctr.swap_at_index(&mut activation.context, index0, index1);
+            ctr.swap_at_index(activation.context, index0, index1);
         }
     }
 
@@ -516,12 +536,14 @@ pub fn swap_children<'gc>(
 /// Implements `DisplayObjectContainer.stopAllMovieClips`
 pub fn stop_all_movie_clips<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(parent) = this.as_display_object() {
         if let Some(mc) = parent.as_movie_clip() {
-            mc.stop(&mut activation.context);
+            mc.stop(activation.context);
         }
 
         if let Some(ctr) = parent.as_container() {
@@ -530,7 +552,7 @@ pub fn stop_all_movie_clips<'gc>(
                     let child_this = child.object2().as_object();
 
                     if let Some(child_this) = child_this {
-                        stop_all_movie_clips(activation, child_this, &[])?;
+                        stop_all_movie_clips(activation, Value::Object(child_this), &[])?;
                     }
                 }
             }
@@ -542,9 +564,11 @@ pub fn stop_all_movie_clips<'gc>(
 
 pub fn get_objects_under_point<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     avm2_stub_method!(
         activation,
         "flash.display.DisplayObjectContainer",
@@ -554,10 +578,10 @@ pub fn get_objects_under_point<'gc>(
 
     let point = args.get_object(activation, 0, "point")?;
     let x = point
-        .get_public_property("x", activation)?
+        .get_slot(point_slots::X)
         .coerce_to_number(activation)?;
     let y = point
-        .get_public_property("y", activation)?
+        .get_slot(point_slots::Y)
         .coerce_to_number(activation)?;
 
     let point = Point {
@@ -570,7 +594,7 @@ pub fn get_objects_under_point<'gc>(
     // FIXME - what are the actual options?
     let options = HitTestOptions::SKIP_MASK;
     while let Some(child) = children.pop() {
-        if child.hit_test_shape(&mut activation.context, point, options) {
+        if child.hit_test_shape(activation.context, point, options) {
             under_point.push(Some(child.object2()));
         }
         if let Some(container) = child.as_container() {
@@ -580,12 +604,12 @@ pub fn get_objects_under_point<'gc>(
         }
     }
 
-    Ok(ArrayObject::from_storage(activation, ArrayStorage::from_storage(under_point))?.into())
+    Ok(ArrayObject::from_storage(activation, ArrayStorage::from_storage(under_point)).into())
 }
 
 pub fn are_inaccessible_objects_under_point<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_method!(
@@ -598,9 +622,11 @@ pub fn are_inaccessible_objects_under_point<'gc>(
 
 pub fn get_mouse_children<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(dobj) = this
         .as_display_object()
         .and_then(|this| this.as_container())
@@ -612,16 +638,18 @@ pub fn get_mouse_children<'gc>(
 
 pub fn set_mouse_children<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(dobj) = this
         .as_display_object()
         .and_then(|this| this.as_container())
     {
         let mouse_children = args.get_bool(0);
 
-        dobj.raw_container_mut(activation.context.gc_context)
+        dobj.raw_container_mut(activation.gc())
             .set_mouse_children(mouse_children);
     }
     Ok(Value::Undefined)
@@ -629,28 +657,35 @@ pub fn set_mouse_children<'gc>(
 
 pub fn get_tab_children<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_getter!(
-        activation,
-        "flash.display.DisplayObjectContainer",
-        "tabChildren"
-    );
+    let this = this.as_object().unwrap();
 
-    Ok(true.into())
+    if let Some(obj) = this
+        .as_display_object()
+        .and_then(|this| this.as_container())
+    {
+        Ok(Value::Bool(obj.is_tab_children(activation.context)))
+    } else {
+        Ok(Value::Undefined)
+    }
 }
 
 pub fn set_tab_children<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    _args: &[Value<'gc>],
+    this: Value<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_setter!(
-        activation,
-        "flash.display.DisplayObjectContainer",
-        "tabChildren"
-    );
+    let this = this.as_object().unwrap();
+
+    if let Some(obj) = this
+        .as_display_object()
+        .and_then(|this| this.as_container())
+    {
+        let value = args.get_bool(0);
+        obj.set_tab_children(activation.context, value);
+    }
 
     Ok(Value::Undefined)
 }

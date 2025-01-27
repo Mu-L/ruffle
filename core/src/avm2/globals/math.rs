@@ -11,7 +11,7 @@ macro_rules! wrap_std {
     ($name:ident, $std:expr) => {
         pub fn $name<'gc>(
             activation: &mut Activation<'_, 'gc>,
-            _this: Object<'gc>,
+            _this: Value<'gc>,
             args: &[Value<'gc>],
         ) -> Result<Value<'gc>, Error<'gc>> {
             if let Some(input) = args.get(0) {
@@ -38,7 +38,7 @@ wrap_std!(tan, f64::tan);
 
 pub fn call_handler<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Err(Error::AvmError(type_error(
@@ -61,7 +61,7 @@ pub fn math_allocator<'gc>(
 
 pub fn round<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(x) = args.get(0) {
@@ -76,7 +76,7 @@ pub fn round<'gc>(
 
 pub fn atan2<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let y = args
@@ -92,7 +92,7 @@ pub fn atan2<'gc>(
 
 pub fn max<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mut cur_max = f64::NEG_INFINITY;
@@ -109,7 +109,7 @@ pub fn max<'gc>(
 
 pub fn min<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mut cur_min = f64::INFINITY;
@@ -126,7 +126,7 @@ pub fn min<'gc>(
 
 pub fn pow<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let n = args
@@ -142,8 +142,12 @@ pub fn pow<'gc>(
 
 pub fn random<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(activation.context.rng.gen_range(0.0f64..1.0f64).into())
+    // See https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/MathUtils.cpp#L1731C24-L1731C44
+    // This generated a restricted set of 'f64' values, which some SWFs implicitly rely on.
+    const MAX_VAL: u32 = 0x7FFFFFFF;
+    let rand = activation.context.rng.gen_range(0..MAX_VAL);
+    Ok(((rand as f64) / (MAX_VAL as f64 + 1f64)).into())
 }

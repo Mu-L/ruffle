@@ -7,10 +7,10 @@ use crate::avm1::{
 };
 use crate::avm_warn;
 use crate::backend::navigator::Request;
-use crate::context::GcContext;
-use crate::string::{AvmString, WStr, WString};
+use crate::string::{AvmString, StringContext, WStr, WString};
 use crate::xml::{custom_unescape, XmlNode, ELEMENT_NODE, TEXT_NODE};
 use gc_arena::{Collect, GcCell, Mutation};
+use quick_xml::errors::IllFormedError;
 use quick_xml::events::attributes::AttrError;
 use quick_xml::{events::Event, Reader};
 
@@ -136,18 +136,23 @@ impl<'gc> Xml<'gc> {
         let mut parser = Reader::from_str(&data_utf8);
         let mut open_tags = vec![self.root()];
 
-        self.0.write(activation.context.gc_context).status = XmlStatus::NoError;
+        self.0.write(activation.gc()).status = XmlStatus::NoError;
 
         loop {
             let event = parser.read_event().map_err(|error| {
-                self.0.write(activation.context.gc_context).status = match error {
-                    quick_xml::Error::UnexpectedEof(_)
+                self.0.write(activation.gc()).status = match error {
+                    quick_xml::Error::Syntax(_)
                     | quick_xml::Error::InvalidAttr(AttrError::ExpectedEq(_))
                     | quick_xml::Error::InvalidAttr(AttrError::Duplicated(_, _)) => {
                         XmlStatus::ElementMalformed
                     }
-                    quick_xml::Error::EndEventMismatch { .. } => XmlStatus::MismatchedEnd,
-                    quick_xml::Error::XmlDeclWithoutVersion(_) => XmlStatus::DeclNotTerminated,
+                    quick_xml::Error::IllFormed(
+                        IllFormedError::MismatchedEndTag { .. }
+                        | IllFormedError::UnmatchedEndTag { .. },
+                    ) => XmlStatus::MismatchedEnd,
+                    quick_xml::Error::IllFormed(IllFormedError::MissingDeclVersion(_)) => {
+                        XmlStatus::DeclNotTerminated
+                    }
                     quick_xml::Error::InvalidAttr(AttrError::UnquotedValue(_)) => {
                         XmlStatus::AttributeNotTerminated
                     }
@@ -168,7 +173,7 @@ impl<'gc> Xml<'gc> {
                     open_tags
                         .last_mut()
                         .unwrap()
-                        .append_child(activation.context.gc_context, child);
+                        .append_child(activation.gc(), child);
                     open_tags.push(child);
                 }
                 Event::Empty(bs) => {
@@ -177,7 +182,7 @@ impl<'gc> Xml<'gc> {
                     open_tags
                         .last_mut()
                         .unwrap()
-                        .append_child(activation.context.gc_context, child);
+                        .append_child(activation.gc(), child);
                 }
                 Event::End(_) => {
                     open_tags.pop();
@@ -203,8 +208,8 @@ impl<'gc> Xml<'gc> {
                     let mut xml_decl = WString::from_buf(b"<?".to_vec());
                     xml_decl.push_str(WStr::from_units(&*bd));
                     xml_decl.push_str(WStr::from_units(b"?>"));
-                    self.0.write(activation.context.gc_context).xml_decl =
-                        Some(AvmString::new(activation.context.gc_context, xml_decl));
+                    self.0.write(activation.gc()).xml_decl =
+                        Some(AvmString::new(activation.gc(), xml_decl));
                 }
                 Event::DocType(bt) => {
                     // TODO: `quick-xml` is case-insensitive for DOCTYPE declarations,
@@ -214,8 +219,8 @@ impl<'gc> Xml<'gc> {
                     let mut doctype = WString::from_buf(b"<!DOCTYPE ".to_vec());
                     doctype.push_str(WStr::from_units(&*bt.escape_ascii().collect::<Vec<_>>()));
                     doctype.push_byte(b'>');
-                    self.0.write(activation.context.gc_context).doctype =
-                        Some(AvmString::new(activation.context.gc_context, doctype));
+                    self.0.write(activation.gc()).doctype =
+                        Some(AvmString::new(activation.gc(), doctype));
                 }
                 Event::Eof => break,
                 _ => {}
@@ -236,12 +241,12 @@ impl<'gc> Xml<'gc> {
         let is_whitespace_char = |c: &u8| matches!(*c, b'\t' | b'\n' | b'\r' | b' ');
         let is_whitespace_text = text.iter().all(is_whitespace_char);
         if !(text.is_empty() || ignore_white && is_whitespace_text) {
-            let text = AvmString::new_utf8_bytes(activation.context.gc_context, text);
-            let child = XmlNode::new(activation.context.gc_context, TEXT_NODE, Some(text));
+            let text = AvmString::new_utf8_bytes(activation.gc(), text);
+            let child = XmlNode::new(activation.gc(), TEXT_NODE, Some(text));
             open_tags
                 .last_mut()
                 .unwrap()
-                .append_child(activation.context.gc_context, child);
+                .append_child(activation.gc(), child);
         }
     }
 }
@@ -269,7 +274,7 @@ fn constructor<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let xml = Xml::empty(activation.context.gc_context, this);
+    let xml = Xml::empty(activation.gc(), this);
 
     if let [text, ..] = args {
         let text = text.coerce_to_string(activation)?;
@@ -293,7 +298,7 @@ fn create_element<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let (NativeObject::Xml(_), [name, ..]) = (this.native(), args) {
         let name = name.coerce_to_string(activation)?;
-        let mut node = XmlNode::new(activation.context.gc_context, ELEMENT_NODE, Some(name));
+        let mut node = XmlNode::new(activation.gc(), ELEMENT_NODE, Some(name));
         return Ok(node.script_object(activation).into());
     }
 
@@ -307,7 +312,7 @@ fn create_text_node<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let (NativeObject::Xml(_), [text, ..]) = (this.native(), args) {
         let text = text.coerce_to_string(activation)?;
-        let mut node = XmlNode::new(activation.context.gc_context, TEXT_NODE, Some(text));
+        let mut node = XmlNode::new(activation.gc(), TEXT_NODE, Some(text));
         return Ok(node.script_object(activation).into());
     }
 
@@ -339,7 +344,7 @@ fn parse_xml<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let NativeObject::Xml(xml) = this.native() {
         for mut child in xml.root().children().rev() {
-            child.remove_node(activation.context.gc_context);
+            child.remove_node(activation.gc());
         }
 
         if let [text, ..] = args {
@@ -518,7 +523,7 @@ fn spawn_xml_fetch<'gc>(
     // Create hidden properties on object.
     if !this.has_property(activation, "_bytesLoaded".into()) {
         this.define_value(
-            activation.context.gc_context,
+            activation.gc(),
             "_bytesLoaded",
             0.into(),
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
@@ -529,7 +534,7 @@ fn spawn_xml_fetch<'gc>(
 
     if !this.has_property(activation, "_bytesTotal".into()) {
         this.define_value(
-            activation.context.gc_context,
+            activation.gc(),
             "_bytesTotal",
             Value::Undefined,
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
@@ -540,7 +545,7 @@ fn spawn_xml_fetch<'gc>(
 
     if !this.has_property(activation, "loaded".into()) {
         this.define_value(
-            activation.context.gc_context,
+            activation.gc(),
             "loaded",
             false.into(),
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
@@ -560,14 +565,14 @@ fn spawn_xml_fetch<'gc>(
 }
 
 pub fn create_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let xml_proto = ScriptObject::new(context.gc_context, Some(proto));
+    let xml_proto = ScriptObject::new(context.gc(), Some(proto));
     define_properties_on(PROTO_DECLS, context, xml_proto, fn_proto);
     FunctionObject::constructor(
-        context.gc_context,
+        context.gc(),
         Executable::Native(constructor),
         constructor_to_fn!(constructor),
         fn_proto,

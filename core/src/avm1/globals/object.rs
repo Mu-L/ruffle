@@ -7,19 +7,18 @@ use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
 use crate::avm_warn;
-use crate::context::GcContext;
 use crate::display_object::TDisplayObject;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "addProperty" => method(add_property; DONT_ENUM | DONT_DELETE);
-    "hasOwnProperty" => method(has_own_property; DONT_ENUM | DONT_DELETE);
-    "isPropertyEnumerable" => method(is_property_enumerable; DONT_DELETE | DONT_ENUM);
-    "isPrototypeOf" => method(is_prototype_of; DONT_ENUM | DONT_DELETE);
+    "addProperty" => method(add_property; DONT_ENUM | DONT_DELETE | VERSION_6);
+    "hasOwnProperty" => method(has_own_property; DONT_ENUM | DONT_DELETE | VERSION_6);
+    "isPropertyEnumerable" => method(is_property_enumerable; DONT_DELETE | DONT_ENUM | VERSION_6);
+    "isPrototypeOf" => method(is_prototype_of; DONT_ENUM | DONT_DELETE | VERSION_6);
     "toString" => method(to_string; DONT_ENUM | DONT_DELETE);
     "valueOf" => method(value_of; DONT_ENUM | DONT_DELETE);
-    "watch" => method(watch; DONT_ENUM | DONT_DELETE);
-    "unwatch" => method(unwatch; DONT_ENUM | DONT_DELETE);
+    "watch" => method(watch; DONT_ENUM | DONT_DELETE | VERSION_6);
+    "unwatch" => method(unwatch; DONT_ENUM | DONT_DELETE | VERSION_6);
 };
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
@@ -46,9 +45,7 @@ pub fn object_function<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let obj = match args.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => {
-            Object::from(ScriptObject::new(activation.context.gc_context, None))
-        }
+        Value::Undefined | Value::Null => Object::from(ScriptObject::new(activation.gc(), None)),
         val => val.coerce_to_object(activation),
     };
     Ok(obj.into())
@@ -240,7 +237,7 @@ fn unwatch<'gc>(
 /// not allocate an object to store either proto. Instead, you must allocate
 /// bare objects for both and let this function fill Object for you.
 pub fn fill_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     object_proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) {
@@ -282,26 +279,23 @@ pub fn as_set_prop_flags<'gc>(
     }
 
     match args.get(1) {
-        Some(&Value::Null) => object.set_attributes(
-            activation.context.gc_context,
-            None,
-            set_attributes,
-            clear_attributes,
-        ),
+        Some(&Value::Null) => {
+            object.set_attributes(activation.gc(), None, set_attributes, clear_attributes)
+        }
         Some(v) => {
             let props = v.coerce_to_string(activation)?;
             if props.contains(b',') {
                 for prop_name in props.split(b',') {
                     object.set_attributes(
-                        activation.context.gc_context,
-                        Some(AvmString::new(activation.context.gc_context, prop_name)),
+                        activation.gc(),
+                        Some(AvmString::new(activation.gc(), prop_name)),
                         set_attributes,
                         clear_attributes,
                     )
                 }
             } else {
                 object.set_attributes(
-                    activation.context.gc_context,
+                    activation.gc(),
                     Some(props),
                     set_attributes,
                     clear_attributes,
@@ -317,12 +311,12 @@ pub fn as_set_prop_flags<'gc>(
 }
 
 pub fn create_object_object<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let object_function = FunctionObject::constructor(
-        context.gc_context,
+        context.gc(),
         Executable::Native(constructor),
         Executable::Native(object_function),
         fn_proto,

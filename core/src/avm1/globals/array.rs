@@ -6,9 +6,8 @@ use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ArrayObject, Object, TObject, Value};
-use crate::context::GcContext;
 use crate::ecma_conversions::f64_to_wrapping_i32;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use bitflags::bitflags;
 use std::cmp::Ordering;
 
@@ -62,12 +61,12 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn create_array_object<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     array_proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let array = FunctionObject::constructor(
-        context.gc_context,
+        context.gc(),
         Executable::Native(constructor),
         Executable::Native(constructor),
         fn_proto,
@@ -94,7 +93,7 @@ pub fn constructor<'gc>(
         Ok(array.into())
     } else {
         Ok(ArrayObject::new(
-            activation.context.gc_context,
+            activation.gc(),
             activation.context.avm1.prototypes().array,
             args.iter().cloned(),
         )
@@ -257,7 +256,7 @@ pub fn join<'gc>(
     };
 
     if length <= 0 {
-        return Ok("".into());
+        return Ok(activation.strings().empty().into());
     }
 
     let parts = (0..length)
@@ -268,7 +267,7 @@ pub fn join<'gc>(
         .collect::<Result<Vec<_>, _>>()?;
 
     let joined = crate::string::join(&parts, &separator);
-    Ok(AvmString::new(activation.context.gc_context, joined).into())
+    Ok(AvmString::new(activation.gc(), joined).into())
 }
 
 /// Handles an index parameter that may be positive (starting from beginning) or negaitve (starting from end).
@@ -303,7 +302,7 @@ pub fn slice<'gc>(
     };
 
     Ok(ArrayObject::new(
-        activation.context.gc_context,
+        activation.gc(),
         activation.context.avm1.prototypes().array,
         (start..end).map(|i| this.get_element(activation, i)),
     )
@@ -368,7 +367,7 @@ pub fn splice<'gc>(
     this.set_length(activation, length - delete_count + items.len() as i32)?;
 
     Ok(ArrayObject::new(
-        activation.context.gc_context,
+        activation.gc(),
         activation.context.avm1.prototypes().array,
         result_elements,
     )
@@ -403,7 +402,7 @@ pub fn concat<'gc>(
         }
     }
     Ok(ArrayObject::new(
-        activation.context.gc_context,
+        activation.gc(),
         activation.context.avm1.prototypes().array,
         elements,
     )
@@ -648,7 +647,7 @@ fn sort_internal<'gc>(
         // Array.RETURNINDEXEDARRAY returns an array containing the sorted indices, and does not modify
         // the original array.
         Ok(ArrayObject::new(
-            activation.context.gc_context,
+            activation.gc(),
             activation.context.avm1.prototypes().array,
             elements.into_iter().map(|(index, _)| index.into()),
         )
@@ -675,79 +674,70 @@ fn qsort<'gc>(
         return Ok(());
     }
 
-    // Fast-path for 2 elements.
-    if let [(_, a), (_, b)] = &elements {
-        if compare_fn(activation, a, b, options)?.is_gt() {
-            elements.swap(0, 1);
+    // Stack for storing inclusive subarray boundaries (start and end).
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    stack.push((0, elements.len() - 1));
+
+    while let Some((low, high)) = stack.pop() {
+        if low >= high {
+            continue;
         }
-        return Ok(());
-    }
 
-    // Flash always chooses the leftmost element as the pivot.
-    let (_, pivot) = elements[0];
+        // Flash always chooses the leftmost element as the pivot.
+        let pivot = elements[low].1;
 
-    // Order the elements (excluding the pivot) such that all elements lower
-    // than the pivot come before all elements greater than the pivot.
-    //
-    // This is done by iterating from both ends, swapping greater elements with
-    // lower ones along the way.
-    let mut left = 1;
-    let mut right = elements.len() - 1;
-    loop {
-        // Find an element greater than the pivot from the left.
-        while left < elements.len() - 1 {
-            let (_, item) = &elements[left];
-            if compare_fn(activation, &pivot, item, options)?.is_le() {
+        let mut left = low + 1;
+        let mut right = high;
+
+        loop {
+            // Find an element greater than the pivot from the left.
+            while left <= high {
+                let (_, item) = &elements[left];
+                if compare_fn(activation, &pivot, item, options)?.is_le() {
+                    break;
+                }
+                left += 1;
+            }
+
+            // Find an element lower than the pivot from the right.
+            while right > low {
+                let (_, item) = &elements[right];
+                if compare_fn(activation, &pivot, item, options)?.is_gt() {
+                    break;
+                }
+                right -= 1;
+            }
+
+            // When left and right cross, then no element greater than
+            // the pivot comes before an element lower than the pivot.
+            if left >= right {
                 break;
             }
-            left += 1;
+
+            // Otherwise, swap left and right, and keep going.
+            elements.swap(left, right);
         }
 
-        // Find an element lower than the pivot from the right.
-        while right > 0 {
-            let (_, item) = &elements[right];
-            if compare_fn(activation, &pivot, item, options)?.is_gt() {
-                break;
-            }
-            right -= 1;
-        }
+        // Move the pivot element to its position between the partitions.
+        elements.swap(low, right);
 
-        // When left and right cross, then no element greater than
-        // the pivot comes before an element lower than the pivot.
-        if left >= right {
-            break;
+        // Push subarrays onto the stack for further sorting.
+        if right > 0 {
+            stack.push((low, right - 1));
         }
-
-        // Otherwise, swap left and right, and keep going.
-        elements.swap(left, right);
+        stack.push((right + 1, high));
     }
 
-    // The elements are now ordered as follows:
-    // [0]: pivot
-    // [1..=right]: lower partition (empty if right == 0)
-    // [right + 1..]: higher partition
-
-    // Swap the pivot with the last element in the lower partition,
-    // moving it in between the lower and higher partitions.
-    elements.swap(0, right);
-
-    // The elements are now ordered as follows:
-    // [..right]: lower partition
-    // [right]: pivot
-    // [right + 1..]: higher partition
-
-    // Recursively sort the lower and higher partitions.
-    qsort(activation, &mut elements[..right], compare_fn, options)?;
-    qsort(activation, &mut elements[right + 1..], compare_fn, options)?;
     Ok(())
 }
 
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let array = ArrayObject::empty_with_proto(context.gc_context, proto);
+    let array = ArrayObject::empty_with_proto(context.gc(), proto);
     let object = array.raw_script_object();
     define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()

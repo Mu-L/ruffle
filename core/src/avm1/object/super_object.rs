@@ -7,7 +7,7 @@ use crate::avm1::error::Error;
 use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::{search_prototype, ExecutionName};
 use crate::avm1::property::Attribute;
-use crate::avm1::{Object, ObjectPtr, ScriptObject, TObject, Value};
+use crate::avm1::{NativeObject, Object, ObjectPtr, ScriptObject, TObject, Value};
 use crate::display_object::DisplayObject;
 use crate::string::AvmString;
 use gc_arena::{Collect, Gc, Mutation};
@@ -42,10 +42,7 @@ pub struct SuperObjectData<'gc> {
 impl<'gc> SuperObject<'gc> {
     /// Construct a `super` for an incoming stack frame.
     pub fn new(activation: &mut Activation<'_, 'gc>, this: Object<'gc>, depth: u8) -> Self {
-        Self(Gc::new(
-            activation.context.gc_context,
-            SuperObjectData { this, depth },
-        ))
+        Self(Gc::new(activation.gc(), SuperObjectData { this, depth }))
     }
 
     pub fn this(&self) -> Object<'gc> {
@@ -281,5 +278,13 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn as_display_object(&self) -> Option<DisplayObject<'gc>> {
         //`super` actually can be used to invoke MovieClip methods
         self.0.this.as_display_object()
+    }
+
+    fn native(&self) -> NativeObject<'gc> {
+        self.0.this.native()
+    }
+
+    fn set_native(&self, gc_context: &Mutation<'gc>, native: NativeObject<'gc>) {
+        self.0.this.set_native(gc_context, native);
     }
 }

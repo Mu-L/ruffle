@@ -1,20 +1,19 @@
 //! Object builtin and prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
+use crate::avm2::class::{Class, ClassAttributes};
+use crate::avm2::error;
 use crate::avm2::method::{Method, NativeMethodImpl, ParamConfig};
 use crate::avm2::object::{FunctionObject, Object, TObject};
 use crate::avm2::traits::Trait;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::QName;
-use gc_arena::GcCell;
+use crate::avm2::{Error, Multiname, QName};
+use crate::string::AvmString;
 
 /// Implements `Object`'s instance initializer.
 pub fn instance_init<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
@@ -22,17 +21,17 @@ pub fn instance_init<'gc>(
 
 fn class_call<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this_class = activation.subclass_object().unwrap();
+    let object_class = activation.avm2().classes().object;
 
     if args.is_empty() {
-        return this_class.construct(activation, args).map(|o| o.into());
+        return object_class.construct(activation, args);
     }
     let arg = args.get(0).cloned().unwrap();
     if matches!(arg, Value::Undefined) || matches!(arg, Value::Null) {
-        return this_class.construct(activation, args).map(|o| o.into());
+        return object_class.construct(activation, args);
     }
     Ok(arg)
 }
@@ -40,11 +39,13 @@ fn class_call<'gc>(
 /// Implements `Object`'s class initializer
 pub fn class_init<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let scope = activation.create_scopechain();
-    let gc_context = activation.context.gc_context;
+    let gc_context = activation.gc();
     let this_class = this.as_class_object().unwrap();
     let object_proto = this_class.prototype();
 
@@ -55,7 +56,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(has_own_property, "hasOwnProperty", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -67,7 +69,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(property_is_enumerable, "propertyIsEnumerable", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -83,7 +86,8 @@ pub fn class_init<'gc>(
             ),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -95,7 +99,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(is_prototype_of, "isPrototypeOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -107,7 +112,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(to_string, "toString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -116,10 +122,11 @@ pub fn class_init<'gc>(
         "toLocaleString",
         FunctionObject::from_method(
             activation,
-            Method::from_builtin(to_locale_string, "toLocaleString", gc_context),
+            Method::from_builtin(to_string, "toLocaleString", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -131,7 +138,8 @@ pub fn class_init<'gc>(
             Method::from_builtin(value_of, "valueOf", gc_context),
             scope,
             None,
-            Some(this_class),
+            None,
+            None,
         )
         .into(),
         activation,
@@ -155,57 +163,61 @@ pub fn class_init<'gc>(
 /// Implements `Object.prototype.toString`
 fn to_string<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    this.to_string(activation)
-}
+    if let Some(this) = this.as_object() {
+        this.to_string(activation)
+    } else {
+        let class_name = this.instance_class(activation).name().local_name();
 
-/// Implements `Object.prototype.toLocaleString`
-fn to_locale_string<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    this.to_locale_string(activation)
+        Ok(AvmString::new_utf8(activation.gc(), format!("[object {class_name}]")).into())
+    }
 }
 
 /// Implements `Object.prototype.valueOf`
 fn value_of<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    this.value_of(activation.context.gc_context)
+    Ok(this)
 }
 
 /// `Object.prototype.hasOwnProperty`
 pub fn has_own_property<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let name: Result<&Value<'gc>, Error<'gc>> =
-        args.get(0).ok_or_else(|| "No name specified".into());
-    let name = name?.coerce_to_string(activation)?;
+    let name = args.get(0).expect("No name specified");
+    let name = name.coerce_to_string(activation)?;
 
-    Ok(this.has_own_property_string(name, activation)?.into())
+    if let Some(this) = this.as_object() {
+        Ok(this.has_own_property_string(name, activation)?.into())
+    } else {
+        let name = Multiname::new(activation.avm2().find_public_namespace(), name);
+
+        Ok(this.has_trait(activation, &name).into())
+    }
 }
 
 /// `Object.prototype.isPrototypeOf`
 pub fn is_prototype_of<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let mut target_proto = args.get(0).cloned().unwrap_or(Value::Undefined);
+    if let Some(this) = this.as_object() {
+        let mut target_proto = args.get(0).cloned().unwrap_or(Value::Undefined);
 
-    while let Value::Object(proto) = target_proto {
-        if Object::ptr_eq(this, proto) {
-            return Ok(true.into());
+        while let Value::Object(proto) = target_proto {
+            if Object::ptr_eq(this, proto) {
+                return Ok(true.into());
+            }
+
+            target_proto = proto.proto().map(|o| o.into()).unwrap_or(Value::Undefined);
         }
-
-        target_proto = proto.proto().map(|o| o.into()).unwrap_or(Value::Undefined);
     }
 
     Ok(false.into())
@@ -214,28 +226,42 @@ pub fn is_prototype_of<'gc>(
 /// `Object.prototype.propertyIsEnumerable`
 pub fn property_is_enumerable<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let name: Result<&Value<'gc>, Error<'gc>> =
-        args.get(0).ok_or_else(|| "No name specified".into());
-    let name = name?.coerce_to_string(activation)?;
+    if let Some(this) = this.as_object() {
+        let name = args.get(0).expect("No name specified");
+        let name = name.coerce_to_string(activation)?;
 
-    Ok(this.property_is_enumerable(name).into())
+        Ok(this.property_is_enumerable(name).into())
+    } else {
+        Ok(false.into())
+    }
 }
 
 /// `Object.prototype.setPropertyIsEnumerable`
 pub fn set_property_is_enumerable<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let name: Result<&Value<'gc>, Error<'gc>> =
-        args.get(0).ok_or_else(|| "No name specified".into());
-    let name = name?.coerce_to_string(activation)?;
+    let name = args.get(0).expect("No name specified");
+    let name = name.coerce_to_string(activation)?;
 
-    if let Some(Value::Bool(is_enum)) = args.get(1) {
-        this.set_local_property_is_enumerable(activation.context.gc_context, name, *is_enum);
+    if let Some(this) = this.as_object() {
+        if let Some(Value::Bool(is_enum)) = args.get(1) {
+            this.set_local_property_is_enumerable(activation.gc(), name, *is_enum);
+        }
+    } else {
+        let instance_class = this.instance_class(activation);
+        let multiname = Multiname::new(activation.avm2().find_public_namespace(), name);
+
+        return Err(error::make_reference_error(
+            activation,
+            error::ReferenceErrorCode::InvalidWrite,
+            &multiname,
+            instance_class,
+        ));
     }
 
     Ok(Value::Undefined)
@@ -244,34 +270,28 @@ pub fn set_property_is_enumerable<'gc>(
 /// Undocumented `Object.init`, which is a no-op
 pub fn init<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
-/// Construct `Object`'s class.
-pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Class<'gc>> {
-    let gc_context = activation.context.gc_context;
-    let object_class = Class::new(
-        QName::new(activation.avm2().public_namespace, "Object"),
+/// Construct `Object`'s i_class.
+pub fn create_i_class<'gc>(activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+    let gc_context = activation.gc();
+    let namespaces = activation.avm2().namespaces;
+
+    let object_i_class = Class::custom_new(
+        QName::new(namespaces.public_all(), "Object"),
         None,
         Method::from_builtin(instance_init, "<Object instance initializer>", gc_context),
-        Method::from_builtin(class_init, "<Object class initializer>", gc_context),
         gc_context,
     );
-    let mut write = object_class.write(gc_context);
-    write.set_call_handler(Method::from_builtin(
-        class_call,
-        "<Object call handler>",
-        gc_context,
-    ));
 
-    write.define_class_trait(Trait::from_const(
-        QName::new(activation.avm2().public_namespace, "length"),
-        Multiname::new(activation.avm2().public_namespace, "int"),
-        Some(1.into()),
-    ));
+    object_i_class.set_call_handler(
+        gc_context,
+        Method::from_builtin(class_call, "<Object call handler>", gc_context),
+    );
 
     // Fixed traits (in AS3 namespace)
     let as3_instance_methods: Vec<(&str, NativeMethodImpl, _, _)> = vec![
@@ -279,46 +299,72 @@ pub fn create_class<'gc>(activation: &mut Activation<'_, 'gc>) -> GcCell<'gc, Cl
         (
             "hasOwnProperty",
             has_own_property,
-            vec![ParamConfig::optional(
-                "name",
-                Multiname::any(activation.context.gc_context),
-                Value::Undefined,
-            )],
-            Multiname::new(activation.avm2().public_namespace, "Boolean"),
+            vec![ParamConfig::optional("name", None, Value::Undefined)],
+            Some(activation.avm2().multinames.boolean),
         ),
         (
             "isPrototypeOf",
             is_prototype_of,
-            vec![ParamConfig::optional(
-                "theClass",
-                Multiname::any(activation.context.gc_context),
-                Value::Undefined,
-            )],
-            Multiname::new(activation.avm2().public_namespace, "Boolean"),
+            vec![ParamConfig::optional("theClass", None, Value::Undefined)],
+            Some(activation.avm2().multinames.boolean),
         ),
         (
             "propertyIsEnumerable",
             property_is_enumerable,
-            vec![ParamConfig::optional(
-                "name",
-                Multiname::any(activation.context.gc_context),
-                Value::Undefined,
-            )],
-            Multiname::new(activation.avm2().public_namespace, "Boolean"),
+            vec![ParamConfig::optional("name", None, Value::Undefined)],
+            Some(activation.avm2().multinames.boolean),
         ),
     ];
-    write.define_builtin_instance_methods_with_sig(
+    object_i_class.define_builtin_instance_methods_with_sig(
         gc_context,
-        activation.avm2().as3_namespace,
+        namespaces.as3,
         as3_instance_methods,
     );
 
-    const INTERNAL_INIT_METHOD: &[(&str, NativeMethodImpl)] = &[("init", init)];
-    write.define_builtin_class_methods(
+    object_i_class.mark_traits_loaded(activation.gc());
+    object_i_class
+        .init_vtable(activation.context)
+        .expect("Native class's vtable should initialize");
+
+    object_i_class
+}
+
+/// Construct `Object`'s c_class.
+pub fn create_c_class<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    class_i_class: Class<'gc>,
+) -> Class<'gc> {
+    let gc_context = activation.gc();
+    let namespaces = activation.avm2().namespaces;
+
+    let object_c_class = Class::custom_new(
+        QName::new(namespaces.public_all(), "Object$"),
+        Some(class_i_class),
+        Method::from_builtin(class_init, "<Object class initializer>", gc_context),
         gc_context,
-        activation.avm2().internal_namespace,
+    );
+    object_c_class.set_attributes(gc_context, ClassAttributes::FINAL);
+
+    object_c_class.define_instance_trait(
+        gc_context,
+        Trait::from_const(
+            QName::new(activation.avm2().namespaces.public_all(), "length"),
+            Some(activation.avm2().multinames.int),
+            Some(1.into()),
+        ),
+    );
+
+    const INTERNAL_INIT_METHOD: &[(&str, NativeMethodImpl)] = &[("init", init)];
+    object_c_class.define_builtin_instance_methods(
+        gc_context,
+        namespaces.internal,
         INTERNAL_INIT_METHOD,
     );
 
-    object_class
+    object_c_class.mark_traits_loaded(activation.gc());
+    object_c_class
+        .init_vtable(activation.context)
+        .expect("Native class's vtable should initialize");
+
+    object_c_class
 }

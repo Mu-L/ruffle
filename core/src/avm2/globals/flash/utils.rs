@@ -1,8 +1,10 @@
 //! `flash.utils` namespace
 
-use crate::avm2::object::TObject;
+use crate::avm2::globals::avmplus::instance_class_describe_type;
 
-use crate::avm2::{Activation, Error, Object, Value};
+use crate::avm2::object::TObject;
+use crate::avm2::parameters::ParametersExt;
+use crate::avm2::{Activation, Error, Value};
 use crate::string::AvmString;
 use crate::string::WString;
 use std::fmt::Write;
@@ -16,7 +18,7 @@ pub mod timer;
 /// Implements `flash.utils.getTimer`
 pub fn get_timer<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok((Instant::now()
@@ -28,7 +30,7 @@ pub fn get_timer<'gc>(
 /// Implements `flash.utils.setInterval`
 pub fn set_interval<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if args.len() < 2 {
@@ -57,7 +59,7 @@ pub fn set_interval<'gc>(
 /// Implements `flash.utils.clearInterval`
 pub fn clear_interval<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let id = args
@@ -71,7 +73,7 @@ pub fn clear_interval<'gc>(
 /// Implements `flash.utils.setTimeout`
 pub fn set_timeout<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if args.len() < 2 {
@@ -100,7 +102,7 @@ pub fn set_timeout<'gc>(
 /// Implements `flash.utils.clearTimeout`
 pub fn clear_timeout<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let id = args
@@ -114,7 +116,7 @@ pub fn clear_timeout<'gc>(
 /// Implements `flash.utils.escapeMultiByte`
 pub fn escape_multi_byte<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let s = args
@@ -133,7 +135,7 @@ pub fn escape_multi_byte<'gc>(
             let _ = write!(&mut result, "%{byte:02X}");
         }
     }
-    Ok(AvmString::new(activation.context.gc_context, result).into())
+    Ok(AvmString::new(activation.gc(), result).into())
 }
 
 fn handle_percent<I>(chars: &mut I) -> Option<u8>
@@ -148,7 +150,7 @@ where
 /// Implements `flash.utils.unescapeMultiByte`
 pub fn unescape_multi_byte<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let s = args
@@ -180,67 +182,38 @@ pub fn unescape_multi_byte<'gc>(
 
         buf.push_char(c);
     }
-    let v = AvmString::new(activation.context.gc_context, buf);
+    let v = AvmString::new(activation.gc(), buf);
     Ok(v.into())
 }
 
 /// Implements `flash.utils.getQualifiedClassName`
 pub fn get_qualified_class_name<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    // This is a native method, which enforces the argument count.
-    let val = args[0];
-    match val {
-        Value::Null => return Ok("null".into()),
-        Value::Undefined => return Ok("void".into()),
-        _ => {}
-    }
-    let obj = val.coerce_to_object(activation)?;
+    let value = args.get_value(0);
+    let class = instance_class_describe_type(activation, value);
 
-    let class = match obj.as_class_object() {
-        Some(class) => class,
-        None => match obj.instance_of() {
-            Some(cls) => cls,
-            None => return Ok(Value::Null),
-        },
-    };
-
-    Ok(class
-        .inner_class_definition()
-        .read()
-        .name()
-        .to_qualified_name(activation.context.gc_context)
-        .into())
+    let mc = activation.gc();
+    Ok(class.dollar_removed_name(mc).to_qualified_name(mc).into())
 }
 
 /// Implements `flash.utils.getQualifiedSuperclassName`
 pub fn get_qualified_superclass_name<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let obj = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_object(activation)?;
+    let value = args.get_value(0);
 
-    let class = match obj.as_class_object() {
-        Some(class) => class,
-        None => match obj.instance_of() {
-            Some(cls) => cls,
-            None => return Ok(Value::Null),
-        },
+    let class = match value.as_object().and_then(|o| o.as_class_object()) {
+        Some(class) => class.inner_class_definition(),
+        None => instance_class_describe_type(activation, value),
     };
 
-    if let Some(super_class) = class.superclass_object() {
-        Ok(super_class
-            .inner_class_definition()
-            .read()
-            .name()
-            .to_qualified_name(activation.context.gc_context)
-            .into())
+    if let Some(super_class) = class.super_class() {
+        Ok(super_class.name().to_qualified_name(activation.gc()).into())
     } else {
         Ok(Value::Null)
     }
@@ -249,7 +222,7 @@ pub fn get_qualified_superclass_name<'gc>(
 /// Implements native method `flash.utils.getDefinitionByName`
 pub fn get_definition_by_name<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let appdomain = activation

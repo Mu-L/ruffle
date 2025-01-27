@@ -1,5 +1,4 @@
-use crate::avm2::error::type_error;
-use crate::avm2::object::PrimitiveObject;
+use crate::avm2::error::make_error_2007;
 use crate::avm2::Object;
 use crate::avm2::{Activation, Error, Value};
 use crate::string::AvmString;
@@ -12,9 +11,10 @@ pub trait ParametersExt<'gc> {
     /// Gets the value at the given index.
     fn get_value(&self, index: usize) -> Value<'gc>;
 
-    /// Gets the value at the given index and coerces it to an Object.
+    /// Gets the value at the given index as an Object. It is expected that the
+    /// value is either Object or Null.
     ///
-    /// If the value is null or is undefined, a TypeError 2007 is raised.
+    /// If the value is null, a TypeError 2007 is raised.
     fn get_object(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -22,9 +22,10 @@ pub trait ParametersExt<'gc> {
         name: &'static str,
     ) -> Result<Object<'gc>, Error<'gc>>;
 
-    /// Tries to get the value at the given index and coerce it to an Object.
+    /// Gets the value at the given index as an Object. It is expected that the
+    /// value is either Object or Null.
     ///
-    /// If the value is null or is undefined, None is returned.
+    /// If the value is null, None is returned.
     fn try_get_object(
         &self,
         activation: &mut Activation<'_, 'gc>,
@@ -107,25 +108,21 @@ impl<'gc> ParametersExt<'gc> for &[Value<'gc>] {
         name: &'static str,
     ) -> Result<Object<'gc>, Error<'gc>> {
         match self[index] {
-            Value::Null | Value::Undefined => Err(null_parameter_error(activation, name)),
+            Value::Null => Err(make_error_2007(activation, name)),
             Value::Object(o) => Ok(o),
-            primitive => Ok(PrimitiveObject::from_primitive(primitive, activation)
-                .expect("Primitive object is infallible at this point")),
+            _ => panic!("get_object should read Object or Null"),
         }
     }
 
     fn try_get_object(
         &self,
-        activation: &mut Activation<'_, 'gc>,
+        _activation: &mut Activation<'_, 'gc>,
         index: usize,
     ) -> Option<Object<'gc>> {
         match self[index] {
-            Value::Null | Value::Undefined => None,
+            Value::Null => None,
             Value::Object(o) => Some(o),
-            primitive => Some(
-                PrimitiveObject::from_primitive(primitive, activation)
-                    .expect("Primitive object is infallible at this point"),
-            ),
+            _ => panic!("try_get_object should read Object or Null"),
         }
     }
 
@@ -172,7 +169,7 @@ impl<'gc> ParametersExt<'gc> for &[Value<'gc>] {
         name: &'static str,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         match self[index] {
-            Value::Null | Value::Undefined => Err(null_parameter_error(activation, name)),
+            Value::Null | Value::Undefined => Err(make_error_2007(activation, name)),
             other => other.coerce_to_string(activation),
         }
     }
@@ -186,17 +183,5 @@ impl<'gc> ParametersExt<'gc> for &[Value<'gc>] {
             Value::Null | Value::Undefined => Ok(None),
             other => Ok(Some(other.coerce_to_string(activation)?)),
         }
-    }
-}
-
-pub fn null_parameter_error<'gc>(activation: &mut Activation<'_, 'gc>, name: &str) -> Error<'gc> {
-    let error = type_error(
-        activation,
-        &format!("Error #2007: Parameter {name} must be non-null."),
-        2007,
-    );
-    match error {
-        Err(e) => e,
-        Ok(e) => Error::AvmError(e),
     }
 }

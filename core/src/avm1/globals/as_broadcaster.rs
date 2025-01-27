@@ -7,8 +7,7 @@ use crate::avm1::object::TObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::Declaration;
 use crate::avm1::{Activation, ArrayObject, Object, ScriptObject, Value};
-use crate::context::GcContext;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use gc_arena::{Collect, Mutation};
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
@@ -19,11 +18,11 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn create<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> (BroadcasterFunctions<'gc>, Object<'gc>) {
-    let gc_context = context.gc_context;
+    let gc_context = context.gc();
     let as_broadcaster_proto = ScriptObject::new(gc_context, Some(proto));
     let as_broadcaster = FunctionObject::constructor(
         gc_context,
@@ -188,7 +187,7 @@ fn initialize<'gc>(
     if let Some(val) = args.get(0) {
         let broadcaster = val.coerce_to_object(activation);
         initialize_internal(
-            activation.context.gc_context,
+            activation.gc(),
             broadcaster,
             activation.context.avm1.broadcaster_functions(),
             activation.context.avm1.prototypes().array,
