@@ -70,7 +70,10 @@ package flash.xml
                 }
                 var index = parentNode.childNodes.indexOf(this);
                 if (index > -1) {
-                    parentNode.childNodes.removeAt(index);
+                    // For some reason ASC doesn't add the AS3 namespace here;
+                    // we need to add it manually since removeAt is only defined
+                    // in the AS3 namespace
+                    parentNode.childNodes.AS3::removeAt(index);
                 }
             }
 
@@ -132,13 +135,37 @@ package flash.xml
         }
 
         public function getNamespaceForPrefix(prefix: String): String {
-            stub_method("flash.xml.XMLNode", "getNamespaceForPrefix");
-            return "";
+            for (var attr in attributes) {
+                if (attr.indexOf("xmlns:") != 0) {
+                    continue;
+                }
+                if (attr.substring(6) == prefix) {
+                    return attributes[attr];
+                }
+            }
+
+            if (parentNode) {
+                return parentNode.getNamespaceForPrefix(prefix);
+            }
+
+            return null;
         }
 
         public function getPrefixForNamespace(ns: String): String {
-            stub_method("flash.xml.XMLNode", "getPrefixForNamespace");
-            return "";
+            for (var attr in attributes) {
+                if (attr.indexOf("xmlns:") != 0) {
+                    continue;
+                }
+                if (attributes[attr] == ns) {
+                    return attr.substring(6);
+                }
+            }
+
+            if (parentNode) {
+                return parentNode.getPrefixForNamespace(ns);
+            }
+
+            return null;
         }
 
         public function get localName(): String {
@@ -166,7 +193,19 @@ package flash.xml
         }
 
         public function get namespaceURI(): String {
-            stub_getter("flash.xml.XMLNode", "namespaceURI");
+            if (prefix) {
+                return getNamespaceForPrefix(prefix);
+            }
+
+            var node: XMLNode = this;
+            do {
+                if (node.attributes.xmlns) {
+                    return node.attributes.xmlns;
+                }
+
+                node = node.parentNode;
+            } while (node);
+
             return null;
         }
 

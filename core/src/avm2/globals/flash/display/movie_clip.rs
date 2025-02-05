@@ -14,18 +14,20 @@ use crate::string::{AvmString, WString};
 /// specify what methods of a clip's class run on which frames.
 pub fn add_frame_script<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
         for (frame_id, callable) in args.chunks_exact(2).map(|s| (s[0], s[1])) {
             let frame_id = frame_id.coerce_to_u32(activation)? as u16 + 1;
-            let callable = callable.as_callable(activation, None, None, false).ok();
+            let callable = callable.as_object();
 
-            mc.register_frame_script(frame_id, callable, &mut activation.context);
+            mc.register_frame_script(frame_id, callable, activation.context);
         }
     } else {
         tracing::error!("Attempted to add frame scripts to non-MovieClip this!");
@@ -37,9 +39,11 @@ pub fn add_frame_script<'gc>(
 /// Implements `currentFrame`.
 pub fn get_current_frame<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -62,9 +66,11 @@ pub fn get_current_frame<'gc>(
 /// Implements `currentFrameLabel`.
 pub fn get_current_frame_label<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -75,7 +81,7 @@ pub fn get_current_frame_label<'gc>(
                 if start_frame < mc.current_frame() {
                     None
                 } else {
-                    Some(AvmString::new(activation.context.gc_context, label).into())
+                    Some(AvmString::new(activation.gc(), label).into())
                 }
             })
             .unwrap_or(Value::Null));
@@ -87,18 +93,18 @@ pub fn get_current_frame_label<'gc>(
 /// Implements `currentLabel`.
 pub fn get_current_label<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
         return Ok(mc
             .current_label()
-            .map(|(label, _start_frame)| {
-                AvmString::new(activation.context.gc_context, label).into()
-            })
+            .map(|(label, _start_frame)| AvmString::new(activation.gc(), label).into())
             .unwrap_or(Value::Null));
     }
 
@@ -124,27 +130,29 @@ fn labels_for_scene<'gc>(
     let mut frame_labels = Vec::with_capacity(labels.len());
 
     for (name, frame) in labels {
-        let name: Value<'gc> = AvmString::new(activation.context.gc_context, name).into();
+        let name: Value<'gc> = AvmString::new(activation.gc(), name).into();
         let local_frame = frame - scene_start + 1;
         let args = [name, local_frame.into()];
         let frame_label = frame_label_class.construct(activation, &args)?;
 
-        frame_labels.push(Some(frame_label.into()));
+        frame_labels.push(Some(frame_label));
     }
 
     Ok((
         scene_name.to_string(),
         *scene_length,
-        ArrayObject::from_storage(activation, ArrayStorage::from_storage(frame_labels))?,
+        ArrayObject::from_storage(activation, ArrayStorage::from_storage(frame_labels)),
     ))
 }
 
 /// Implements `currentLabels`.
 pub fn get_current_labels<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -163,9 +171,11 @@ pub fn get_current_labels<'gc>(
 /// Implements `currentScene`.
 pub fn get_current_scene<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -178,14 +188,14 @@ pub fn get_current_scene<'gc>(
         let (scene_name, scene_length, scene_labels) = labels_for_scene(activation, mc, &scene)?;
         let scene_class = activation.context.avm2.classes().scene;
         let args = [
-            AvmString::new_utf8(activation.context.gc_context, scene_name).into(),
+            AvmString::new_utf8(activation.gc(), scene_name).into(),
             scene_labels.into(),
             scene_length.into(),
         ];
 
         let scene = scene_class.construct(activation, &args)?;
 
-        return Ok(scene.into());
+        return Ok(scene);
     }
 
     Ok(Value::Undefined)
@@ -193,9 +203,11 @@ pub fn get_current_scene<'gc>(
 
 pub fn get_enabled<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -208,16 +220,18 @@ pub fn get_enabled<'gc>(
 
 pub fn set_enabled<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
         let enabled = args.get_bool(0);
 
-        mc.set_avm2_enabled(&mut activation.context, enabled);
+        mc.set_avm2_enabled(activation.context, enabled);
     }
 
     Ok(Value::Undefined)
@@ -226,9 +240,11 @@ pub fn set_enabled<'gc>(
 /// Implements `scenes`.
 pub fn get_scenes<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -248,20 +264,20 @@ pub fn get_scenes<'gc>(
                 labels_for_scene(activation, mc, &scene)?;
             let scene_class = activation.context.avm2.classes().scene;
             let args = [
-                AvmString::new_utf8(activation.context.gc_context, scene_name).into(),
+                AvmString::new_utf8(activation.gc(), scene_name).into(),
                 scene_labels.into(),
                 scene_length.into(),
             ];
 
             let scene = scene_class.construct(activation, &args)?;
 
-            scene_objects.push(Some(scene.into()));
+            scene_objects.push(Some(scene));
         }
 
         return Ok(ArrayObject::from_storage(
             activation,
             ArrayStorage::from_storage(scene_objects),
-        )?
+        )
         .into());
     }
 
@@ -271,9 +287,11 @@ pub fn get_scenes<'gc>(
 /// Implements `framesLoaded`.
 pub fn get_frames_loaded<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -287,9 +305,11 @@ pub fn get_frames_loaded<'gc>(
 /// Implements `isPlaying`.
 pub fn get_is_playing<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -303,9 +323,11 @@ pub fn get_is_playing<'gc>(
 /// Implements `totalFrames`.
 pub fn get_total_frames<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -319,14 +341,16 @@ pub fn get_total_frames<'gc>(
 /// Implements `gotoAndPlay`.
 pub fn goto_and_play<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.set_programmatically_played(activation.context.gc_context);
+        mc.set_programmatically_played(activation.gc());
         goto_frame(activation, mc, args, false)?;
     }
 
@@ -336,9 +360,11 @@ pub fn goto_and_play<'gc>(
 /// Implements `gotoAndStop`.
 pub fn goto_and_stop<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -382,7 +408,7 @@ pub fn goto_frame<'gc>(
                     //If the user specified a scene, we need to validate that
                     //the requested frame exists within that scene.
                     let scene = args[1].coerce_to_string(activation)?;
-                    if !mc.frame_exists_within_scene(&frame_or_label, &scene, &activation.context) {
+                    if !mc.frame_exists_within_scene(&frame_or_label, &scene, activation.context) {
                         return Err(Error::AvmError(argument_error(
                             activation,
                             &format!("Error #2109: Frame label {frame_or_label} not found in scene {scene}."),
@@ -391,14 +417,9 @@ pub fn goto_frame<'gc>(
                     }
                 }
 
-                let frame = mc.frame_label_to_number(&frame_or_label, &activation.context);
+                let frame = mc.frame_label_to_number(&frame_or_label, activation.context);
 
-                if activation
-                    .caller_movie()
-                    .expect("Caller SWF should exist")
-                    .version()
-                    >= 11
-                {
+                if activation.caller_movie_or_root().version() >= 11 {
                     frame.ok_or(
                         // TODO: Also include the scene in the error message, as done above
                         Error::AvmError(argument_error(
@@ -414,7 +435,7 @@ pub fn goto_frame<'gc>(
         }
     };
 
-    mc.goto_frame(&mut activation.context, frame.max(1) as u16, stop);
+    mc.goto_frame(activation.context, frame.max(1) as u16, stop);
 
     Ok(())
 }
@@ -422,14 +443,16 @@ pub fn goto_frame<'gc>(
 /// Implements `stop`.
 pub fn stop<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.stop(&mut activation.context);
+        mc.stop(activation.context);
     }
 
     Ok(Value::Undefined)
@@ -438,15 +461,17 @@ pub fn stop<'gc>(
 /// Implements `play`.
 pub fn play<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.set_programmatically_played(activation.context.gc_context);
-        mc.play(&mut activation.context);
+        mc.set_programmatically_played(activation.gc());
+        mc.play(activation.context);
     }
 
     Ok(Value::Undefined)
@@ -455,14 +480,16 @@ pub fn play<'gc>(
 /// Implements `prevFrame`.
 pub fn prev_frame<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.prev_frame(&mut activation.context);
+        mc.prev_frame(activation.context);
     }
 
     Ok(Value::Undefined)
@@ -471,14 +498,16 @@ pub fn prev_frame<'gc>(
 /// Implements `nextFrame`.
 pub fn next_frame<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
-        mc.next_frame(&mut activation.context);
+        mc.next_frame(activation.context);
     }
 
     Ok(Value::Undefined)
@@ -487,9 +516,11 @@ pub fn next_frame<'gc>(
 /// Implements `prevScene`.
 pub fn prev_scene<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -500,7 +531,7 @@ pub fn prev_scene<'gc>(
             length: _,
         }) = mc.previous_scene()
         {
-            mc.goto_frame(&mut activation.context, start, false);
+            mc.goto_frame(activation.context, start, false);
         }
     }
 
@@ -510,9 +541,11 @@ pub fn prev_scene<'gc>(
 /// Implements `nextScene`.
 pub fn next_scene<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(mc) = this
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
@@ -523,7 +556,7 @@ pub fn next_scene<'gc>(
             length: _,
         }) = mc.next_scene()
         {
-            mc.goto_frame(&mut activation.context, start, false);
+            mc.goto_frame(activation.context, start, false);
         }
     }
 

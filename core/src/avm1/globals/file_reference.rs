@@ -6,8 +6,7 @@ use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Executable, NativeObject, Object, ScriptObject, TObject, Value};
 use crate::avm1_stub;
 use crate::backend::ui::{FileDialogResult, FileFilter};
-use crate::context::GcContext;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use gc_arena::{Collect, GcCell};
 use url::Url;
 
@@ -122,7 +121,7 @@ pub fn creator<'gc>(
             .creator
             .as_ref()
             .map_or(Value::Undefined, |x| {
-                AvmString::new_utf8(activation.context.gc_context, x).into()
+                AvmString::new_utf8(activation.gc(), x).into()
             }));
     }
 
@@ -157,7 +156,7 @@ pub fn name<'gc>(
             .name
             .as_ref()
             .map_or(Value::Undefined, |x| {
-                AvmString::new_utf8(activation.context.gc_context, x).into()
+                AvmString::new_utf8(activation.gc(), x).into()
             }));
     }
 
@@ -170,11 +169,9 @@ pub fn post_data<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let NativeObject::FileReference(file_ref) = this.native() {
-        return Ok(AvmString::new_utf8(
-            activation.context.gc_context,
-            file_ref.0.read().post_data.clone(),
-        )
-        .into());
+        return Ok(
+            AvmString::new_utf8(activation.gc(), file_ref.0.read().post_data.clone()).into(),
+        );
     }
 
     Ok(Value::Undefined)
@@ -191,7 +188,7 @@ pub fn set_post_data<'gc>(
         .coerce_to_string(activation)?;
 
     if let NativeObject::FileReference(file_ref) = this.native() {
-        file_ref.0.write(activation.context.gc_context).post_data = post_data.to_string();
+        file_ref.0.write(activation.gc()).post_data = post_data.to_string();
     }
 
     Ok(Value::Undefined)
@@ -225,7 +222,7 @@ pub fn file_type<'gc>(
             .file_type
             .as_ref()
             .map_or(Value::Undefined, |x| {
-                AvmString::new_utf8(activation.context.gc_context, x).into()
+                AvmString::new_utf8(activation.gc(), x).into()
             }));
     }
 
@@ -336,7 +333,7 @@ pub fn download<'gc>(
             Some(file_name) => file_name.coerce_to_string(activation)?.to_string(),
             None => {
                 // Try to get the end of the path as a file name, if we can't bail and return false
-                match url.path().split('/').last() {
+                match url.path().split('/').next_back() {
                     Some(path_end) => path_end.to_string(),
                     None => return Ok(false.into()),
                 }
@@ -427,9 +424,9 @@ fn constructor<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     this.set_native(
-        activation.context.gc_context,
+        activation.gc(),
         NativeObject::FileReference(FileReferenceObject(GcCell::new(
-            activation.context.gc_context,
+            activation.gc(),
             Default::default(),
         ))),
     );
@@ -437,17 +434,17 @@ fn constructor<'gc>(
 }
 
 pub fn create_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
     array_proto: Object<'gc>,
     broadcaster_functions: BroadcasterFunctions<'gc>,
 ) -> Object<'gc> {
-    let file_reference_proto = ScriptObject::new(context.gc_context, Some(proto));
+    let file_reference_proto = ScriptObject::new(context.gc(), Some(proto));
     define_properties_on(PROTO_DECLS, context, file_reference_proto, fn_proto);
-    broadcaster_functions.initialize(context.gc_context, file_reference_proto.into(), array_proto);
+    broadcaster_functions.initialize(context.gc(), file_reference_proto.into(), array_proto);
     let constructor = FunctionObject::constructor(
-        context.gc_context,
+        context.gc(),
         Executable::Native(constructor),
         constructor_to_fn!(constructor),
         fn_proto,

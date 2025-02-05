@@ -8,10 +8,20 @@ update-ruffle = Ruffle 업데이트
 ruffle-demo = 웹 데모
 ruffle-desktop = 데스크톱 애플리케이션
 ruffle-wiki = Ruffle 위키 보기
-enable-hardware-acceleration = 하드웨어 가속이 활성화되지 않은 것 같습니다. Ruffle은 계속 작동하지만 실행 속도가 매우 느릴 수 있습니다. 하드웨어 가속을 활성화하는 방법을 알아보려면 다음 링크를 참고해보세요.
+enable-hardware-acceleration = 하드웨어 가속이 비활성화되어 있는 것 같습니다. Ruffle은 계속 작동하지만 매우 느릴 수 있습니다. 아래 링크를 참고하여 하드웨어 가속을 활성화하는 방법을 찾아보세요:
+enable-hardware-acceleration-link = FAQ - 크롬 하드웨어 가속
 view-error-details = 오류 세부 정보 보기
 open-in-new-tab = 새 탭에서 열기
 click-to-unmute = 클릭하여 음소거 해제
+clipboard-message-title = Ruffle에서 복사하고 붙여넣기
+clipboard-message-description =
+    { $variant ->
+       *[unsupported] 이 브라우저는 클립보드 액세스를 지원하지 않습니다,
+        [access-denied] 클립보드 액세스가 거절되었습니다,
+    } 하지만 다음 단축키를 대신 사용할 수 있습니다:
+clipboard-message-copy = { " " } 복사
+clipboard-message-cut = { " " } 잘라내기
+clipboard-message-paste = { " " } 붙여넣기
 error-file-protocol =
     Ruffle을 "file:" 프로토콜에서 실행하고 있는 것으로 보입니다.
     브라우저에서는 이 프로토콜을 보안상의 이유로 많은 기능을 작동하지 않게 차단하므로 이 방법은 작동하지 않습니다.
@@ -28,6 +38,9 @@ error-wasm-mime-type =
     Ruffle이 초기화를 시도하는 동안 중대한 문제가 발생했습니다.
     이 웹 서버는 올바른 MIME 유형의 ".wasm" 파일을 제공하지 않습니다.
     만약 당신이 서버 관리자라면 Ruffle 위키를 통해 도움을 받으세요.
+error-invalid-swf =
+    Ruffle이 요청한 파일을 분석하지 못했습니다.
+    요청한 파일이 유효한 SWF 파일이 아닐 가능성이 높습니다.
 error-swf-fetch =
     Ruffle이 플래시 SWF 파일을 로드하는 데 실패하였습니다.
     이는 주로 파일이 더 이상 존재하지 않아 Ruffle이 로드할 수 있는 것이 없을 가능성이 높습니다.
@@ -53,6 +66,9 @@ error-wasm-disabled-on-edge =
     이를 해결하려면 브라우저 설정에서 "개인 정보, 검색 및 서비스"를 클릭한 후, 하단으로 스크롤하여 "웹에서 보안 강화" 기능을 꺼야 합니다.
     이는 필요한 ".wasm" 파일을 브라우저에서 로드할 수 있도록 허용합니다.
     이 문제가 지속될 경우 다른 브라우저를 사용해야 할 수 있습니다.
+error-wasm-unsupported-browser =
+    사용 중인 브라우저에서 Ruffle이 필요한 웹 어셈블리 확장을 지원하지 않습니다. 
+    지원되는 브라우저로 전환하세요. 지원되는 브라우저 목록은 위키에서 확인할 수 있습니다.
 error-javascript-conflict =
     Ruffle이 초기화를 시도하는 동안 중대한 문제가 발생했습니다.
     이 페이지에서 사용되는 자바스크립트 코드가 Ruffle과 충돌하는 것으로 보입니다.

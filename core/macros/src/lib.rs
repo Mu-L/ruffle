@@ -1,13 +1,14 @@
 //! Proc macros used by Ruffle to generate various boilerplate.
 extern crate proc_macro;
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, FnArg, ImplItem, ImplItemFn, ItemEnum, ItemTrait, Pat,
-    TraitItem, Visibility,
+    parse_macro_input, parse_quote, FnArg, ImplItem, ImplItemFn, ItemEnum, ItemTrait, LitStr, Meta,
+    Pat, TraitItem, Visibility,
 };
 
-/// `enum_trait_object` will define an enum whose variants each implement a trait.
+/// Define an enum whose variants each implement a trait.
+///
 /// It can be used as faux-dynamic dispatch. This is used as an alternative to a
 /// trait object, which doesn't get along with GC'd types.
 ///
@@ -35,7 +36,7 @@ use syn::{
 #[proc_macro_attribute]
 pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input.
-    let input_trait = parse_macro_input!(item as ItemTrait);
+    let mut input_trait = parse_macro_input!(item as ItemTrait);
     let trait_name = &input_trait.ident;
     let trait_generics = &input_trait.generics;
     let enum_input = parse_macro_input!(args as ItemEnum);
@@ -62,10 +63,33 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
     // to the underlying type.
     let trait_methods: Vec<_> = input_trait
         .items
-        .iter()
-        .map(|item| match item {
-            TraitItem::Fn(method) => {
+        .iter_mut()
+        .filter_map(|item| match item {
+            TraitItem::Fn(ref mut method) => {
                 let method_name = &method.sig.ident;
+
+                let mut is_no_dynamic = false;
+
+                method.attrs.retain(|attr| match &attr.meta {
+                    Meta::Path(path) => {
+                        if path.is_ident("no_dynamic") {
+                            is_no_dynamic = true;
+
+                            // Remove the #[no_dynamic] attribute from the
+                            // list of method attributes.
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ => true,
+                });
+
+                if is_no_dynamic {
+                    // Don't create this method as a dynamic-dispatch method
+                    return None;
+                }
+
                 let params: Vec<_> = method
                     .sig
                     .inputs
@@ -91,19 +115,20 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
                         }
                     })
                     .collect();
+
                 let method_block = quote!({
                     match self {
                         #(#match_arms)*
                     }
                 });
 
-                ImplItem::Fn(ImplItemFn {
+                Some(ImplItem::Fn(ImplItemFn {
                     attrs: method.attrs.clone(),
                     vis: Visibility::Inherited,
                     defaultness: None,
                     sig: method.sig.clone(),
                     block: parse_quote!(#method_block),
-                })
+                }))
             }
             _ => panic!("Unsupported trait item: {item:?}"),
         })
@@ -144,6 +169,22 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         #(#from_impls)*
+    );
+
+    out.into()
+}
+
+/// Get the string passed to it as an interned string, assumed to be present on
+/// the StringContext of the currently in-scope `activation` variable. For example,
+/// `istr("description")` expands to `activation.strings().common.str_description`.
+#[proc_macro]
+pub fn istr(item: TokenStream) -> TokenStream {
+    let string = parse_macro_input!(item as LitStr).value();
+
+    let string_ident = format_ident!("str_{}", string);
+
+    let out = quote!(
+        activation.strings().common().#string_ident
     );
 
     out.into()

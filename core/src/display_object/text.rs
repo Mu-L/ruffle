@@ -2,7 +2,7 @@ use crate::avm2::{
     Activation as Avm2Activation, Object as Avm2Object, StageObject as Avm2StageObject,
 };
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
+use crate::display_object::{DisplayObjectBase, DisplayObjectPtr};
 use crate::font::TextRenderSettings;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
@@ -11,6 +11,7 @@ use core::fmt;
 use gc_arena::{Collect, GcCell, Mutation};
 use ruffle_render::commands::CommandHandler;
 use ruffle_render::transform::Transform;
+use ruffle_wstr::WString;
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
 
@@ -38,16 +39,16 @@ pub struct TextData<'gc> {
 
 impl<'gc> Text<'gc> {
     pub fn from_swf_tag(
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         swf: Arc<SwfMovie>,
         tag: &swf::Text,
     ) -> Self {
         Text(GcCell::new(
-            context.gc_context,
+            context.gc(),
             TextData {
                 base: Default::default(),
                 static_data: gc_arena::Gc::new(
-                    context.gc_context,
+                    context.gc(),
                     TextStatic {
                         swf,
                         id: tag.id,
@@ -66,6 +67,29 @@ impl<'gc> Text<'gc> {
         self.0.write(gc_context).render_settings = settings;
         self.invalidate_cached_bitmap(gc_context);
     }
+
+    pub fn text(&self, context: &mut UpdateContext<'gc>) -> WString {
+        let data = self.0.read().static_data;
+        let mut ret = WString::new();
+
+        for block in &data.text_blocks {
+            let font_id = block.font_id.unwrap_or_default();
+            if let Some(font) = context
+                .library
+                .library_for_movie(self.movie())
+                .unwrap()
+                .get_font(font_id)
+            {
+                for glyph in &block.glyphs {
+                    if let Some(g) = font.get_glyph(glyph.index as usize) {
+                        ret.push_char(g.character());
+                    }
+                }
+            }
+        }
+
+        ret
+    }
 }
 
 impl<'gc> TDisplayObject<'gc> for Text<'gc> {
@@ -81,6 +105,10 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         Self(GcCell::new(gc_context, self.0.read().clone())).into()
     }
 
+    fn as_text(&self) -> Option<Text<'gc>> {
+        Some(*self)
+    }
+
     fn as_ptr(&self) -> *const DisplayObjectPtr {
         self.0.as_ptr() as *const DisplayObjectPtr
     }
@@ -93,17 +121,17 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
         self.0.read().static_data.swf.clone()
     }
 
-    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc>, id: CharacterId) {
+    fn replace_with(&self, context: &mut UpdateContext<'gc>, id: CharacterId) {
         if let Some(new_text) = context
             .library
             .library_for_movie_mut(self.movie())
             .get_text(id)
         {
-            self.0.write(context.gc_context).static_data = new_text.0.read().static_data;
+            self.0.write(context.gc()).static_data = new_text.0.read().static_data;
         } else {
             tracing::warn!("PlaceObject: expected text at character ID {}", id);
         }
-        self.invalidate_cached_bitmap(context.gc_context);
+        self.invalidate_cached_bitmap(context.gc());
     }
 
     fn run_frame_avm1(&self, _context: &mut UpdateContext) {
@@ -171,7 +199,7 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
 
     fn hit_test_shape(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         mut point: Point<Twips>,
         options: HitTestOptions,
     ) -> bool {
@@ -238,27 +266,25 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
 
     fn post_instantiation(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         _init_object: Option<crate::avm1::Object<'gc>>,
         _instantiated_by: Instantiator,
         _run_frame: bool,
     ) {
-        if context.is_action_script_3() {
+        if self.movie().is_action_script_3() {
             let domain = context
                 .library
                 .library_for_movie(self.movie())
                 .unwrap()
                 .avm2_domain();
-            let mut activation = Avm2Activation::from_domain(context.reborrow(), domain);
+            let mut activation = Avm2Activation::from_domain(context, domain);
             let statictext = activation.avm2().classes().statictext;
             match Avm2StageObject::for_display_object_childless(
                 &mut activation,
                 (*self).into(),
                 statictext,
             ) {
-                Ok(object) => {
-                    self.0.write(activation.context.gc_context).avm2_object = Some(object.into())
-                }
+                Ok(object) => self.0.write(activation.gc()).avm2_object = Some(object.into()),
                 Err(e) => tracing::error!("Got error when creating AVM2 side of Text: {}", e),
             }
 
@@ -274,8 +300,8 @@ impl<'gc> TDisplayObject<'gc> for Text<'gc> {
             .unwrap_or(Avm2Value::Null)
     }
 
-    fn set_object2(&self, context: &mut UpdateContext<'_, 'gc>, to: Avm2Object<'gc>) {
-        self.0.write(context.gc_context).avm2_object = Some(to);
+    fn set_object2(&self, context: &mut UpdateContext<'gc>, to: Avm2Object<'gc>) {
+        self.0.write(context.gc()).avm2_object = Some(to);
     }
 }
 

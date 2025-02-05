@@ -1,16 +1,21 @@
 import * as utils from "./utils";
-import { PublicAPI } from "ruffle-core";
-import type {
-    Letterbox,
-    RufflePlayer,
-    DataLoadOptions,
-    URLLoadOptions,
-} from "ruffle-core";
+import { Setup } from "ruffle-core";
 
-const api = PublicAPI.negotiate(window.RufflePlayer!, "local");
-window.RufflePlayer = api;
-const ruffle = api.newest()!;
-let player: RufflePlayer;
+import type { Config, Player } from "ruffle-core";
+
+declare global {
+    interface Navigator {
+        /**
+         * iPadOS sends a User-Agent string that appears to be from macOS.
+         * navigator.standalone is not defined on macOS, so we use it for iPad detection.
+         */
+        standalone?: boolean;
+    }
+}
+
+Setup.installRuffle("local");
+const ruffle = (window.RufflePlayer as Setup.PublicAPI).newest()!;
+let player: Player.PlayerElement;
 
 const playerContainer = document.getElementById("player-container")!;
 const overlay = document.getElementById("overlay")!;
@@ -23,12 +28,17 @@ const reloadSwf = document.getElementById("reload-swf")!;
 const infoContainer = document.getElementById("info-container")!;
 const webFormSubmit = document.getElementById("web-form-submit")!;
 const webURL = document.getElementById("web-url")! as HTMLInputElement;
+const modal = document.getElementById("modal")! as HTMLDialogElement;
+const closeModal = document.getElementById("close")! as HTMLButtonElement;
+const grant = document.getElementById("grant")! as HTMLButtonElement;
 
-// Default config used by the player.
-const defaultConfig = {
-    letterbox: "on" as Letterbox,
+// This is the base config always used by the extension player.
+// It has the highest priority and its options cannot be overwritten.
+const baseExtensionConfig = {
+    letterbox: "on" as Config.Letterbox,
     forceScale: true,
     forceAlign: true,
+    showSwfDownload: true,
 };
 
 const swfToFlashVersion: { [key: number]: string } = {
@@ -88,15 +98,43 @@ function unload() {
     }
 }
 
-function load(options: string | DataLoadOptions | URLLoadOptions) {
+async function load(
+    options: string | Config.DataLoadOptions | Config.URLLoadOptions,
+) {
     unload();
     player = ruffle.createPlayer();
     player.id = "player";
     playerContainer.append(player);
-    player.load(options);
+    const url =
+        typeof options === "string"
+            ? options
+            : "url" in options
+              ? options["url"]
+              : undefined;
+    let origin;
+    try {
+        origin = url ? new URL(url).origin + "/" : url;
+    } catch {
+        // Ignore
+    }
+    const hostPermissionsForSpecifiedTab =
+        await utils.hasHostPermissionForSpecifiedTab(origin);
+    if (origin && !hostPermissionsForSpecifiedTab) {
+        const result = await showModal(origin);
+        if (result === "") {
+            const swfPlayerPermissions = utils.i18n.getMessage(
+                "swf_player_permissions",
+            );
+            alert(swfPlayerPermissions);
+            history.pushState("", document.title, window.location.pathname);
+            return;
+        }
+    }
+    await player.ruffle().load(options);
     player.addEventListener("loadedmetadata", () => {
-        if (player.metadata) {
-            for (const [key, value] of Object.entries(player.metadata)) {
+        const metadata = player.ruffle().metadata;
+        if (metadata) {
+            for (const [key, value] of Object.entries(metadata)) {
                 const metadataElement = document.getElementById(key);
                 if (metadataElement) {
                     switch (key) {
@@ -131,7 +169,13 @@ async function loadFile(file: File | undefined) {
         localFileName.textContent = file.name;
     }
     const data = await new Response(file).arrayBuffer();
-    load({ data: data, swfFileName: file.name, ...defaultConfig });
+    const options = await utils.getExplicitOptions();
+    load({
+        ...options,
+        data: data,
+        swfFileName: file.name,
+        ...baseExtensionConfig,
+    });
     history.pushState("", document.title, window.location.pathname);
 }
 
@@ -201,15 +245,52 @@ reloadSwf.addEventListener("click", () => {
     if (player) {
         const confirmReload = confirm("Reload the current SWF?");
         if (confirmReload) {
-            player.reload();
+            player.ruffle().reload();
         }
     }
 });
+function showModal(origin: string) {
+    return new Promise((resolve, _reject) => {
+        grant.textContent = "Grant permissions on " + origin;
+        function grantClicked() {
+            modal.close();
+            utils.permissions
+                .request({
+                    origins: [origin],
+                })
+                .then((permissionsGranted) => {
+                    if (permissionsGranted) {
+                        resolve(origin);
+                    } else {
+                        resolve("");
+                    }
+                })
+                .catch(() => {
+                    resolve("");
+                })
+                .finally(() => {
+                    closeModal.removeEventListener("click", closeClicked);
+                });
+        }
+
+        function closeClicked() {
+            modal.close();
+            resolve("");
+            grant.removeEventListener("click", grantClicked);
+        }
+
+        grant.addEventListener("click", grantClicked, { once: true });
+        closeModal.addEventListener("click", closeClicked, { once: true });
+        modal.showModal();
+    });
+}
 
 window.addEventListener("load", () => {
     if (
         navigator.userAgent.match(/iPad/i) ||
-        navigator.userAgent.match(/iPhone/i)
+        navigator.userAgent.match(/iPhone/i) ||
+        (navigator.platform === "MacIntel" &&
+            typeof navigator.standalone !== "undefined")
     ) {
         localFileInput.removeAttribute("accept");
     }
@@ -231,7 +312,7 @@ async function loadSwf(swfUrl: string) {
         ...options,
         url: swfUrl,
         base: swfUrl.substring(0, swfUrl.lastIndexOf("/") + 1),
-        ...defaultConfig,
+        ...baseExtensionConfig,
     });
 }
 

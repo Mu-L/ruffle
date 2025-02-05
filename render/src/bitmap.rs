@@ -3,7 +3,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use downcast_rs::{impl_downcast, Downcast};
-use ruffle_wstr::WStr;
 use swf::{Rectangle, Twips};
 
 use crate::backend::RenderBackend;
@@ -11,6 +10,12 @@ use crate::matrix::Matrix;
 
 #[derive(Clone, Debug)]
 pub struct BitmapHandle(pub Arc<dyn BitmapHandleImpl>);
+
+impl PartialEq for BitmapHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 pub trait BitmapHandleImpl: Downcast + Debug {}
 impl_downcast!(BitmapHandleImpl);
@@ -40,13 +45,7 @@ pub trait BitmapSource {
 
 pub type RgbaBufRead<'a> = Box<dyn FnOnce(&[u8], u32) + 'a>;
 
-pub trait SyncHandle: Downcast + Debug {
-    /// Retrieves the rendered pixels from a previous `render_offscreen` call
-    fn retrieve_offscreen_texture(
-        self: Box<Self>,
-        with_rgba: RgbaBufRead,
-    ) -> Result<(), crate::error::Error>;
-}
+pub trait SyncHandle: Downcast + Debug {}
 impl_downcast!(SyncHandle);
 
 impl Clone for Box<dyn SyncHandle> {
@@ -68,29 +67,7 @@ pub enum PixelSnapping {
     Never,
 }
 
-impl From<PixelSnapping> for &'static WStr {
-    fn from(value: PixelSnapping) -> &'static WStr {
-        match value {
-            PixelSnapping::Always => WStr::from_units(b"always"),
-            PixelSnapping::Auto => WStr::from_units(b"auto"),
-            PixelSnapping::Never => WStr::from_units(b"never"),
-        }
-    }
-}
-
 impl PixelSnapping {
-    pub fn from_wstr(str: &WStr) -> Option<Self> {
-        if str == b"always" {
-            Some(PixelSnapping::Always)
-        } else if str == b"auto" {
-            Some(PixelSnapping::Auto)
-        } else if str == b"never" {
-            Some(PixelSnapping::Never)
-        } else {
-            None
-        }
-    }
-
     pub fn apply(&self, matrix: &mut Matrix) {
         match self {
             PixelSnapping::Always => {
@@ -355,10 +332,7 @@ impl PixelRegion {
         let (min, max) = ((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)));
 
         // Increase max by one pixel as we've calculated the *encompassed* max
-        let max = (
-            max.0 + Twips::from_pixels_i32(1),
-            max.1 + Twips::from_pixels_i32(1),
-        );
+        let max = (max.0 + Twips::ONE_PX, max.1 + Twips::ONE_PX);
 
         // Make sure we're never going below 0
         Self {
