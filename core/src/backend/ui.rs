@@ -1,12 +1,10 @@
 use crate::backend::navigator::OwnedFuture;
-use crate::events::{KeyCode, PlayerEvent, TextControlCode};
 pub use crate::loader::Error as DialogLoaderError;
 use chrono::{DateTime, Utc};
 use downcast_rs::Downcast;
 use fluent_templates::loader::langid;
 pub use fluent_templates::LanguageIdentifier;
 use std::borrow::Cow;
-use std::collections::HashSet;
 use url::Url;
 
 pub type FullscreenError = Cow<'static, str>;
@@ -15,6 +13,15 @@ pub static US_ENGLISH: LanguageIdentifier = langid!("en-US");
 pub enum FontDefinition<'a> {
     /// A singular DefineFont tag extracted from a swf.
     SwfTag(swf::Font<'a>, &'static swf::Encoding),
+
+    /// A font contained in an external file, such as a ttf.
+    FontFile {
+        name: String,
+        is_bold: bool,
+        is_italic: bool,
+        data: Vec<u8>,
+        index: u32,
+    },
 }
 
 /// A filter specifying a category that can be selected from a file chooser dialog
@@ -39,15 +46,14 @@ pub trait FileDialogResult: Downcast {
     fn file_name(&self) -> Option<String>;
     fn size(&self) -> Option<u64>;
     fn file_type(&self) -> Option<String>;
-    fn creator(&self) -> Option<String>;
+    fn creator(&self) -> Option<String> {
+        None
+    }
     fn contents(&self) -> &[u8];
-    /// Write the given data to the chosen file
-    /// This will not necessarily by reflected in future calls to other functions (such as [FileDialogResult::size]),
-    /// until [FileDialogResult::refresh] is called
-    fn write(&self, data: &[u8]);
-    /// Refresh any internal metadata, any future calls to other functions (such as [FileDialogResult::size]) will reflect
+    /// Write the given data to the chosen file and refresh any internal metadata.
+    /// Any future calls to other functions (such as [FileDialogResult::size]) will reflect
     /// the state at the time of the last refresh
-    fn refresh(&mut self);
+    fn write_and_refresh(&mut self, data: &[u8]);
 }
 impl_downcast!(FileDialogResult);
 
@@ -65,6 +71,11 @@ pub trait UiBackend: Downcast {
     /// Get the clipboard content
     fn clipboard_content(&mut self) -> String;
 
+    /// Check if the clipboard is available and not empty
+    fn clipboard_available(&mut self) -> bool {
+        !self.clipboard_content().is_empty()
+    }
+
     /// Sets the clipboard to the given content.
     fn set_clipboard_content(&mut self, content: String);
 
@@ -73,15 +84,16 @@ pub trait UiBackend: Downcast {
     /// Displays a message about an error during root movie download.
     /// In particular, on web this can be a CORS error, which we can sidestep
     /// by providing a direct .swf link instead.
-    fn display_root_movie_download_failed_message(&self);
+    fn display_root_movie_download_failed_message(&self, _invalid_swf: bool);
 
     // Unused, but kept in case we need it later.
     fn message(&self, message: &str);
 
-    // Only used on web.
     fn open_virtual_keyboard(&self);
 
-    fn language(&self) -> &LanguageIdentifier;
+    fn close_virtual_keyboard(&self);
+
+    fn language(&self) -> LanguageIdentifier;
 
     fn display_unsupported_video(&self, url: Url);
 
@@ -90,8 +102,14 @@ pub trait UiBackend: Downcast {
     ///
     /// You may call `register` any amount of times with any amount of found device fonts.
     /// If you do not call `register` with any fonts that match the request,
-    /// then the font will simply be marked as not found - this may or may not fall back to another font.  
-    fn load_device_font(&self, name: &str, register: &dyn FnMut(FontDefinition));
+    /// then the font will simply be marked as not found - this may or may not fall back to another font.
+    fn load_device_font(
+        &self,
+        name: &str,
+        is_bold: bool,
+        is_italic: bool,
+        register: &mut dyn FnMut(FontDefinition),
+    );
 
     /// Displays a file selection dialog, returning None if the dialog cannot be displayed
     /// (e.g because it is already open)
@@ -121,7 +139,7 @@ pub enum MouseCursor {
     /// Equivalent to AS3 `MouseCursor.ARROW`.
     Arrow,
 
-    /// The hand icon incdicating a button or link.
+    /// The hand icon indicating a button or link.
     /// Equivalent to AS3 `MouseCursor.BUTTON`.
     Hand,
 
@@ -132,105 +150,6 @@ pub enum MouseCursor {
     /// The grabby-dragging hand icon.
     /// Equivalent to AS3 `MouseCursor.HAND`.
     Grab,
-}
-
-pub struct InputManager {
-    keys_down: HashSet<KeyCode>,
-    keys_toggled: HashSet<KeyCode>,
-    last_key: KeyCode,
-    last_char: Option<char>,
-    last_text_control: Option<TextControlCode>,
-}
-
-impl InputManager {
-    pub fn new() -> Self {
-        Self {
-            keys_down: HashSet::new(),
-            keys_toggled: HashSet::new(),
-            last_key: KeyCode::Unknown,
-            last_char: None,
-            last_text_control: None,
-        }
-    }
-
-    fn add_key(&mut self, key_code: KeyCode) {
-        self.last_key = key_code;
-        if key_code != KeyCode::Unknown {
-            self.keys_down.insert(key_code);
-        }
-    }
-
-    fn toggle_key(&mut self, key_code: KeyCode) {
-        if key_code == KeyCode::Unknown || self.keys_down.contains(&key_code) {
-            return;
-        }
-        if self.keys_toggled.contains(&key_code) {
-            self.keys_toggled.remove(&key_code);
-        } else {
-            self.keys_toggled.insert(key_code);
-        }
-    }
-
-    fn remove_key(&mut self, key_code: KeyCode) {
-        self.last_key = key_code;
-        if key_code != KeyCode::Unknown {
-            self.keys_down.remove(&key_code);
-        }
-    }
-
-    pub fn handle_event(&mut self, event: &PlayerEvent) {
-        match *event {
-            PlayerEvent::KeyDown { key_code, key_char } => {
-                self.last_char = key_char;
-                self.toggle_key(key_code);
-                self.add_key(key_code);
-            }
-            PlayerEvent::KeyUp { key_code, key_char } => {
-                self.last_char = key_char;
-                self.remove_key(key_code);
-                self.last_text_control = None;
-            }
-            PlayerEvent::TextControl { code } => {
-                self.last_text_control = Some(code);
-            }
-            PlayerEvent::MouseDown { button, .. } => {
-                self.toggle_key(button.into());
-                self.add_key(button.into())
-            }
-            PlayerEvent::MouseUp { button, .. } => self.remove_key(button.into()),
-            _ => {}
-        }
-    }
-
-    pub fn is_key_down(&self, key: KeyCode) -> bool {
-        self.keys_down.contains(&key)
-    }
-
-    pub fn is_key_toggled(&self, key: KeyCode) -> bool {
-        self.keys_toggled.contains(&key)
-    }
-
-    pub fn last_key_code(&self) -> KeyCode {
-        self.last_key
-    }
-
-    pub fn last_key_char(&self) -> Option<char> {
-        self.last_char
-    }
-
-    pub fn last_text_control(&self) -> Option<TextControlCode> {
-        self.last_text_control
-    }
-
-    pub fn is_mouse_down(&self) -> bool {
-        self.is_key_down(KeyCode::MouseLeft)
-    }
-}
-
-impl Default for InputManager {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// UiBackend that does nothing.
@@ -261,18 +180,27 @@ impl UiBackend for NullUiBackend {
         Ok(())
     }
 
-    fn display_root_movie_download_failed_message(&self) {}
+    fn display_root_movie_download_failed_message(&self, _invalid_swf: bool) {}
 
     fn message(&self, _message: &str) {}
 
     fn display_unsupported_video(&self, _url: Url) {}
 
-    fn load_device_font(&self, _name: &str, _register: &dyn FnMut(FontDefinition)) {}
+    fn load_device_font(
+        &self,
+        _name: &str,
+        _is_bold: bool,
+        _is_italic: bool,
+        _register: &mut dyn FnMut(FontDefinition),
+    ) {
+    }
 
     fn open_virtual_keyboard(&self) {}
 
-    fn language(&self) -> &LanguageIdentifier {
-        &US_ENGLISH
+    fn close_virtual_keyboard(&self) {}
+
+    fn language(&self) -> LanguageIdentifier {
+        US_ENGLISH.clone()
     }
 
     fn display_file_open_dialog(
@@ -337,14 +265,9 @@ impl FileDialogResult for NullFileDialogResult {
     fn file_type(&self) -> Option<String> {
         None
     }
-    fn creator(&self) -> Option<String> {
-        None
-    }
-
     fn contents(&self) -> &[u8] {
         &[]
     }
 
-    fn write(&self, _data: &[u8]) {}
-    fn refresh(&mut self) {}
+    fn write_and_refresh(&mut self, _data: &[u8]) {}
 }

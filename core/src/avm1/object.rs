@@ -12,14 +12,17 @@ use crate::avm1::globals::drop_shadow_filter::DropShadowFilter;
 use crate::avm1::globals::file_reference::FileReferenceObject;
 use crate::avm1::globals::glow_filter::GlowFilter;
 use crate::avm1::globals::gradient_filter::GradientFilter;
+use crate::avm1::globals::local_connection::LocalConnection;
+use crate::avm1::globals::netconnection::NetConnection;
 use crate::avm1::globals::shared_object::SharedObject;
+use crate::avm1::globals::sound::Sound;
+use crate::avm1::globals::style_sheet::StyleSheetObject;
 use crate::avm1::globals::transform::TransformObject;
 use crate::avm1::globals::xml::Xml;
 use crate::avm1::globals::xml_socket::XmlSocket;
 use crate::avm1::object::array_object::ArrayObject;
 use crate::avm1::object::super_object::SuperObject;
-use crate::avm1::object::value_object::ValueObject;
-use crate::avm1::{Activation, Attribute, Error, ScriptObject, SoundObject, StageObject, Value};
+use crate::avm1::{Activation, Attribute, Error, ScriptObject, StageObject, Value};
 use crate::bitmap::bitmap_data::BitmapDataWrapper;
 use crate::display_object::DisplayObject;
 use crate::display_object::TDisplayObject;
@@ -28,22 +31,23 @@ use crate::streams::NetStream;
 use crate::string::AvmString;
 use crate::xml::XmlNode;
 use gc_arena::{Collect, Gc, GcCell, Mutation};
-use ruffle_macros::enum_trait_object;
+use ruffle_macros::{enum_trait_object, istr};
 use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 
 pub mod array_object;
-mod custom_object;
 pub mod script_object;
-pub mod sound_object;
 pub mod stage_object;
 pub mod super_object;
-pub mod value_object;
 
-#[derive(Clone, Collect)]
+#[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub enum NativeObject<'gc> {
     None,
+    /// A boxed primitive.
+    ///
+    /// It is a logic error for a boxed value to be a `Value::Object`.
+    Value(Gc<'gc, Value<'gc>>),
     Date(Gc<'gc, Cell<Date>>),
     BlurFilter(BlurFilter<'gc>),
     BevelFilter(BevelFilter<'gc>),
@@ -64,6 +68,10 @@ pub enum NativeObject<'gc> {
     SharedObject(GcCell<'gc, SharedObject>),
     XmlSocket(XmlSocket<'gc>),
     FileReference(FileReferenceObject<'gc>),
+    NetConnection(NetConnection<'gc>),
+    LocalConnection(LocalConnection<'gc>),
+    Sound(Sound<'gc>),
+    StyleSheet(StyleSheetObject<'gc>),
 }
 
 /// Represents an object that can be directly interacted with by the AVM
@@ -75,10 +83,8 @@ pub enum NativeObject<'gc> {
     pub enum Object<'gc> {
         ScriptObject(ScriptObject<'gc>),
         ArrayObject(ArrayObject<'gc>),
-        SoundObject(SoundObject<'gc>),
         StageObject(StageObject<'gc>),
         SuperObject(SuperObject<'gc>),
-        ValueObject(ValueObject<'gc>),
         FunctionObject(FunctionObject<'gc>),
     }
 )]
@@ -230,7 +236,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
     /// it can be changed by `Function.apply`/`Function.call`.
     fn call(
         &self,
-        name: AvmString<'gc>,
+        name: impl Into<ExecutionName<'gc>>,
         activation: &mut Activation<'_, 'gc>,
         this: Value<'gc>,
         args: &[Value<'gc>],
@@ -306,7 +312,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         }
     }
 
-    /// Retrive a getter defined on this object.
+    /// Retrieve a getter defined on this object.
     fn getter(
         &self,
         name: AvmString<'gc>,
@@ -315,7 +321,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         self.raw_script_object().getter(name, activation)
     }
 
-    /// Retrive a setter defined on this object.
+    /// Retrieve a setter defined on this object.
     fn setter(
         &self,
         name: AvmString<'gc>,
@@ -556,7 +562,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
                         return Ok(true);
                     }
 
-                    if let Value::Object(o) = interface.get("prototype", activation)? {
+                    if let Value::Object(o) = interface.get(istr!("prototype"), activation)? {
                         proto_stack.push(o);
                     }
                 }
@@ -574,11 +580,6 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
 
     /// Get the underlying array object, if it exists.
     fn as_array_object(&self) -> Option<ArrayObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying sound object, if it exists.
-    fn as_sound_object(&self) -> Option<SoundObject<'gc>> {
         None
     }
 
@@ -609,11 +610,6 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
             NativeObject::XmlNode(xml_node) => Some(xml_node),
             _ => None,
         }
-    }
-
-    /// Get the underlying `ValueObject`, if it exists.
-    fn as_value_object(&self) -> Option<ValueObject<'gc>> {
-        None
     }
 
     fn as_ptr(&self) -> *const ObjectPtr;
@@ -698,6 +694,7 @@ pub fn search_prototype<'gc>(
     is_slash_path: bool,
 ) -> Result<Option<(Value<'gc>, u8)>, Error<'gc>> {
     let mut depth = 0;
+    let orig_proto = proto;
 
     while let Value::Object(p) = proto {
         if depth == 255 {
@@ -726,6 +723,34 @@ pub fn search_prototype<'gc>(
 
         if let Some(value) = p.get_local_stored(name, activation, is_slash_path) {
             return Ok(Some((value, depth)));
+        }
+
+        proto = p.proto(activation);
+        depth += 1;
+    }
+
+    if let Some(resolve) = find_resolve_method(orig_proto, activation)? {
+        let result = resolve.call(istr!("__resolve"), activation, this.into(), &[name.into()])?;
+        return Ok(Some((result, 0)));
+    }
+
+    Ok(None)
+}
+
+/// Finds the appropriate `__resolve` method for an object, searching its hierarchy too.
+pub fn find_resolve_method<'gc>(
+    mut proto: Value<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Option<Object<'gc>>, Error<'gc>> {
+    let mut depth = 0;
+
+    while let Value::Object(p) = proto {
+        if depth == 255 {
+            return Err(Error::PrototypeRecursionLimit);
+        }
+
+        if let Some(value) = p.get_local_stored(istr!("__resolve"), activation, false) {
+            return Ok(Some(value.coerce_to_object(activation)));
         }
 
         proto = p.proto(activation);

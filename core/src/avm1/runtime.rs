@@ -6,10 +6,10 @@ use crate::avm1::object::TObject;
 use crate::avm1::property_map::PropertyMap;
 use crate::avm1::scope::Scope;
 use crate::avm1::{scope, Activation, ActivationIdentifier, Error, Object, Value};
-use crate::context::{GcContext, UpdateContext};
+use crate::context::UpdateContext;
 use crate::frame_lifecycle::FramePhase;
 use crate::prelude::*;
-use crate::string::AvmString;
+use crate::string::{AvmString, StringContext};
 use crate::tag_utils::SwfSlice;
 use crate::{avm1, avm_debug};
 use gc_arena::{Collect, Gc, Mutation};
@@ -90,8 +90,8 @@ pub struct Avm1<'gc> {
 }
 
 impl<'gc> Avm1<'gc> {
-    pub fn new(context: &mut GcContext<'_, 'gc>, player_version: u8) -> Self {
-        let gc_context = context.gc_context;
+    pub fn new(context: &mut StringContext<'gc>, player_version: u8) -> Self {
+        let gc_context = context.gc();
         let (prototypes, globals, broadcaster_functions) = create_globals(context);
 
         Self {
@@ -128,7 +128,7 @@ impl<'gc> Avm1<'gc> {
         active_clip: DisplayObject<'gc>,
         name: S,
         code: SwfSlice,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
     ) {
         if context.avm1.halted {
             // We've been told to ignore all future execution.
@@ -136,7 +136,7 @@ impl<'gc> Avm1<'gc> {
         }
 
         let mut parent_activation = Activation::from_nothing(
-            context.reborrow(),
+            context,
             ActivationIdentifier::root("[Actions Parent]"),
             active_clip,
         );
@@ -145,7 +145,7 @@ impl<'gc> Avm1<'gc> {
             .object()
             .coerce_to_object(&mut parent_activation);
         let child_scope = Gc::new(
-            parent_activation.context.gc_context,
+            parent_activation.gc(),
             Scope::new(
                 parent_activation.scope(),
                 scope::ScopeClass::Target,
@@ -155,7 +155,7 @@ impl<'gc> Avm1<'gc> {
         let constant_pool = parent_activation.context.avm1.constant_pool;
         let child_name = parent_activation.id.child(name);
         let mut child_activation = Activation::from_action(
-            parent_activation.context.reborrow(),
+            parent_activation.context,
             child_name,
             active_clip.swf_version(),
             child_scope,
@@ -174,7 +174,7 @@ impl<'gc> Avm1<'gc> {
     /// This creates a new frame stack.
     pub fn run_with_stack_frame_for_display_object<'a, F, R>(
         active_clip: DisplayObject<'gc>,
-        action_context: &mut UpdateContext<'_, 'gc>,
+        action_context: &mut UpdateContext<'gc>,
         function: F,
     ) -> R
     where
@@ -185,7 +185,7 @@ impl<'gc> Avm1<'gc> {
             _ => panic!("No script object for display object"),
         };
         let child_scope = Gc::new(
-            action_context.gc_context,
+            action_context.gc(),
             Scope::new(
                 action_context.avm1.global_scope,
                 scope::ScopeClass::Target,
@@ -194,7 +194,7 @@ impl<'gc> Avm1<'gc> {
         );
         let constant_pool = action_context.avm1.constant_pool;
         let mut activation = Activation::from_action(
-            action_context.reborrow(),
+            action_context,
             ActivationIdentifier::root("[Display Object]"),
             active_clip.swf_version(),
             child_scope,
@@ -212,7 +212,7 @@ impl<'gc> Avm1<'gc> {
     pub fn run_stack_frame_for_init_action(
         active_clip: DisplayObject<'gc>,
         code: SwfSlice,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
     ) {
         if context.avm1.halted {
             // We've been told to ignore all future execution.
@@ -220,7 +220,7 @@ impl<'gc> Avm1<'gc> {
         }
 
         let mut parent_activation = Activation::from_nothing(
-            context.reborrow(),
+            context,
             ActivationIdentifier::root("[Init Parent]"),
             active_clip,
         );
@@ -229,7 +229,7 @@ impl<'gc> Avm1<'gc> {
             .object()
             .coerce_to_object(&mut parent_activation);
         let child_scope = Gc::new(
-            parent_activation.context.gc_context,
+            parent_activation.gc(),
             Scope::new(
                 parent_activation.scope(),
                 scope::ScopeClass::Target,
@@ -240,7 +240,7 @@ impl<'gc> Avm1<'gc> {
         let constant_pool = parent_activation.context.avm1.constant_pool;
         let child_name = parent_activation.id.child("[Init]");
         let mut child_activation = Activation::from_action(
-            parent_activation.context.reborrow(),
+            parent_activation.context,
             child_name,
             active_clip.swf_version(),
             child_scope,
@@ -258,10 +258,10 @@ impl<'gc> Avm1<'gc> {
     /// method, such as an event handler.
     ///
     /// This creates a new frame stack.
-    pub fn run_stack_frame_for_method<'a, 'b>(
+    pub fn run_stack_frame_for_method(
         active_clip: DisplayObject<'gc>,
         obj: Object<'gc>,
-        context: &'a mut UpdateContext<'b, 'gc>,
+        context: &mut UpdateContext<'gc>,
         name: AvmString<'gc>,
         args: &[Value<'gc>],
     ) {
@@ -271,7 +271,7 @@ impl<'gc> Avm1<'gc> {
         }
 
         let mut activation = Activation::from_nothing(
-            context.reborrow(),
+            context,
             ActivationIdentifier::root(name.to_string()),
             active_clip,
         );
@@ -281,13 +281,13 @@ impl<'gc> Avm1<'gc> {
 
     pub fn notify_system_listeners(
         active_clip: DisplayObject<'gc>,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         broadcaster_name: AvmString<'gc>,
         method: AvmString<'gc>,
         args: &[Value<'gc>],
     ) {
         let mut activation = Activation::from_nothing(
-            context.reborrow(),
+            context,
             ActivationIdentifier::root("[System Listeners]"),
             active_clip,
         );
@@ -301,7 +301,7 @@ impl<'gc> Avm1<'gc> {
             .coerce_to_object(&mut activation);
 
         let has_listener =
-            as_broadcaster::broadcast_internal(&mut activation, broadcaster, args, method)
+            as_broadcaster::broadcast_internal(broadcaster, args, method, &mut activation)
                 .unwrap_or(false);
         drop(activation);
 
@@ -411,7 +411,7 @@ impl<'gc> Avm1<'gc> {
         self.registers.get_mut(id)
     }
 
-    /// Find all display objects with negative depth recurisvely
+    /// Find all display objects with negative depth recursively
     ///
     /// If an object is pending removal due to being removed by a removeObject tag on the previous frame,
     /// while it had an unload event listener attached, avm1 requires that the object is kept around for one extra frame.
@@ -434,7 +434,7 @@ impl<'gc> Avm1<'gc> {
 
     /// Remove all display objects pending removal
     /// See [`find_display_objects_pending_removal`] for details
-    fn remove_pending(context: &mut UpdateContext<'_, 'gc>) {
+    fn remove_pending(context: &mut UpdateContext<'gc>) {
         // Storage for objects to remove
         // Have to do this in two passes to avoid borrow-mut while already borrowed
         let mut out = Vec::new();
@@ -454,14 +454,14 @@ impl<'gc> Avm1<'gc> {
 
             // Update pending removal state
             parent_container
-                .raw_container_mut(context.gc_context)
+                .raw_container_mut(context.gc())
                 .update_pending_removals();
         }
     }
 
     // Run a single frame.
     #[instrument(level = "debug", skip_all)]
-    pub fn run_frame(context: &mut UpdateContext<'_, 'gc>) {
+    pub fn run_frame(context: &mut UpdateContext<'gc>) {
         // Remove pending objects
         Self::remove_pending(context);
 
@@ -478,11 +478,11 @@ impl<'gc> Avm1<'gc> {
             if clip.avm1_removed() {
                 // Clean up removed clips from this frame or a previous frame.
                 if let Some(prev) = prev {
-                    prev.set_next_avm1_clip(context.gc_context, next);
+                    prev.set_next_avm1_clip(context.gc(), next);
                 } else {
                     context.avm1.clip_exec_list = next;
                 }
-                clip.set_next_avm1_clip(context.gc_context, None);
+                clip.set_next_avm1_clip(context.gc(), None);
             } else {
                 clip.run_frame_avm1(context);
                 prev = Some(clip);

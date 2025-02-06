@@ -6,7 +6,7 @@ use downcast_rs::{impl_downcast, Downcast};
 use std::fmt::Debug;
 use swf::{Color, Rectangle, Twips};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Filter {
     BevelFilter(swf::BevelFilter),
     BlurFilter(swf::BlurFilter),
@@ -35,8 +35,22 @@ pub struct ShaderFilter<'a> {
     pub shader_args: Vec<PixelBenderShaderArgument<'a>>,
 }
 
+impl PartialEq for ShaderFilter<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.bottom_extension == other.bottom_extension
+            && self.left_extension == other.left_extension
+            && self.right_extension == other.right_extension
+            && self.top_extension == other.top_extension
+            && self.shader_object.equals(other.shader_object.as_ref())
+            && self.shader == other.shader
+            && self.shader_args == other.shader_args
+    }
+}
+
 pub trait ShaderObject: Downcast + Debug {
     fn clone_box(&self) -> Box<dyn ShaderObject>;
+
+    fn equals(&self, other: &dyn ShaderObject) -> bool;
 }
 impl_downcast!(ShaderObject);
 
@@ -124,15 +138,16 @@ pub enum DisplacementMapFilterComponent {
     Red,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum DisplacementMapFilterMode {
     Clamp,
     Color,
     Ignore,
+    #[default]
     Wrap,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DisplacementMapFilter {
     pub color: Color,
     pub component_x: u8,
@@ -168,22 +183,5 @@ impl DisplacementMapFilter {
         // } else {
         //     source_rect
         // }
-    }
-}
-
-impl Default for DisplacementMapFilter {
-    fn default() -> Self {
-        Self {
-            color: Color::from_rgba(0),
-            component_x: 0,
-            component_y: 0,
-            map_bitmap: None,
-            map_point: (0, 0),
-            mode: DisplacementMapFilterMode::Wrap,
-            scale_x: 0.0,
-            scale_y: 0.0,
-            viewscale_x: 1.0,
-            viewscale_y: 1.0,
-        }
     }
 }

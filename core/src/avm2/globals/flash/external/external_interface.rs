@@ -1,31 +1,27 @@
 use crate::avm2::error::error;
 use crate::avm2::parameters::ParametersExt;
-use crate::avm2::{Activation, Error, Object, Value};
-use crate::external::{Callback, Value as ExternalValue};
+use crate::avm2::{Activation, Error, Value};
+use crate::external::{Callback, ExternalInterface, Value as ExternalValue};
+use crate::string::AvmString;
 
 pub fn call<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let name = args.get_string(activation, 0)?;
     check_available(activation)?;
 
-    if let Some(method) = activation
-        .context
-        .external_interface
-        .get_method_for(&name.to_utf8_lossy())
-    {
-        let mut external_args = Vec::with_capacity(args.len() - 1);
-        for arg in &args[1..] {
-            external_args.push(ExternalValue::from_avm2(arg.to_owned()));
-        }
-        Ok(method
-            .call(&mut activation.context, &external_args)
-            .into_avm2(activation))
-    } else {
-        Ok(Value::Null)
-    }
+    let external_args = args
+        .iter()
+        .skip(1)
+        .map(|arg| ExternalValue::from_avm2(activation, arg.to_owned()))
+        .collect::<Result<Vec<ExternalValue>, Error>>()?;
+
+    Ok(
+        ExternalInterface::call_method(activation.context, &name.to_utf8_lossy(), &external_args)
+            .into_avm2(activation),
+    )
 }
 
 fn check_available<'gc>(activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
@@ -41,7 +37,7 @@ fn check_available<'gc>(activation: &mut Activation<'_, 'gc>) -> Result<(), Erro
 
 pub fn get_available<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(activation.context.external_interface.available().into())
@@ -49,7 +45,7 @@ pub fn get_available<'gc>(
 
 pub fn add_callback<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let name = args.get_string(activation, 0)?;
@@ -62,4 +58,16 @@ pub fn add_callback<'gc>(
         .external_interface
         .add_callback(name.to_string(), Callback::Avm2 { method });
     Ok(Value::Undefined)
+}
+
+pub fn get_object_id<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(id) = activation.context.external_interface.get_id() {
+        Ok(AvmString::new_utf8(activation.gc(), id).into())
+    } else {
+        Ok(Value::Null)
+    }
 }

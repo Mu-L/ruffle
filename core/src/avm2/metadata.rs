@@ -1,11 +1,12 @@
+use crate::avm2::array::ArrayStorage;
+use crate::avm2::object::{ArrayObject, Object, ScriptObject, TObject};
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::{Activation, Error};
+use crate::avm2::{Activation, Error, Value};
 use crate::string::AvmString;
 
 use gc_arena::Collect;
+use ruffle_macros::istr;
 use swf::avm2::types::{Index as AbcIndex, Metadata as AbcMetadata};
-
-use super::{ArrayObject, ArrayStorage, Object, TObject, Value};
 
 // Represents a single key-value pair for a trait metadata.
 #[derive(Clone, Collect, Debug, Eq, PartialEq)]
@@ -28,7 +29,7 @@ impl<'gc> Metadata<'gc> {
     pub fn from_abc_index(
         activation: &mut Activation<'_, 'gc>,
         translation_unit: TranslationUnit<'gc>,
-        metadata: &Vec<AbcIndex<AbcMetadata>>,
+        metadata: &[AbcIndex<AbcMetadata>],
     ) -> Result<Option<Box<[Metadata<'gc>]>>, Error<'gc>> {
         if metadata.is_empty() {
             return Ok(None);
@@ -43,16 +44,16 @@ impl<'gc> Metadata<'gc> {
                 .get(single_metadata.0 as usize)
                 .ok_or_else(|| format!("Unknown metadata {}", single_metadata.0))?;
 
-            let name = translation_unit
-                .pool_string(single_metadata.name.0, &mut activation.borrow_gc())?;
+            let name =
+                translation_unit.pool_string(single_metadata.name.0, activation.strings())?;
 
             let mut current_metadata_items = vec![];
             for metadata_item in single_metadata.items.iter() {
-                let key = translation_unit
-                    .pool_string(metadata_item.key.0, &mut activation.borrow_gc())?;
+                let key =
+                    translation_unit.pool_string(metadata_item.key.0, activation.strings())?;
 
-                let value = translation_unit
-                    .pool_string(metadata_item.value.0, &mut activation.borrow_gc())?;
+                let value =
+                    translation_unit.pool_string(metadata_item.value.0, activation.strings())?;
 
                 let item = MetadataItem {
                     key: key.into(),
@@ -77,31 +78,31 @@ impl<'gc> Metadata<'gc> {
         &self,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        let object = activation
-            .avm2()
-            .classes()
-            .object
-            .construct(activation, &[])?;
-        object.set_public_property("name", self.name.into(), activation)?;
+        let object = ScriptObject::new_object(activation);
+        object.set_string_property_local(istr!("name"), self.name.into(), activation)?;
 
         let values = self
             .items
             .iter()
             .map(|item| {
-                let value_object = activation
-                    .avm2()
-                    .classes()
-                    .object
-                    .construct(activation, &[])?;
-                value_object.set_public_property("key", item.key.into(), activation)?;
-                value_object.set_public_property("value", item.value.into(), activation)?;
+                let value_object = ScriptObject::new_object(activation);
+                value_object.set_string_property_local(
+                    istr!("key"),
+                    item.key.into(),
+                    activation,
+                )?;
+                value_object.set_string_property_local(
+                    istr!("value"),
+                    item.value.into(),
+                    activation,
+                )?;
                 Ok(Some(value_object.into()))
             })
             .collect::<Result<Vec<Option<Value<'gc>>>, Error<'gc>>>()?;
 
         let values_array =
-            ArrayObject::from_storage(activation, ArrayStorage::from_storage(values))?;
-        object.set_public_property("value", values_array.into(), activation)?;
+            ArrayObject::from_storage(activation, ArrayStorage::from_storage(values));
+        object.set_string_property_local(istr!("value"), values_array.into(), activation)?;
         Ok(object)
     }
 }

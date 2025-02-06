@@ -5,10 +5,11 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, ArrayObject, Error, Object, ScriptObject, TObject, Value};
-use crate::context::{GcContext, UpdateContext};
+use crate::context::UpdateContext;
+use crate::string::StringContext;
 use gc_arena::{Collect, GcCell, Mutation};
 use std::ops::Deref;
-use swf::{Color, ConvolutionFilterFlags, Fixed16};
+use swf::{Color, ConvolutionFilterFlags};
 
 #[derive(Clone, Debug, Collect)]
 #[collect(require_static)]
@@ -24,11 +25,6 @@ struct ConvolutionFilterData {
 }
 
 impl ConvolutionFilterData {
-    fn reset_matrix(&mut self) {
-        let len = (self.matrix_x * self.matrix_y) as usize;
-        self.matrix = vec![0.0; len];
-    }
-
     fn resize_matrix(&mut self) {
         let new_len = (self.matrix_x * self.matrix_y) as usize;
         if new_len > self.matrix.len() {
@@ -58,14 +54,9 @@ impl From<&ConvolutionFilterData> for swf::ConvolutionFilter {
         swf::ConvolutionFilter {
             num_matrix_rows: filter.matrix_y,
             num_matrix_cols: filter.matrix_x,
-            matrix: filter
-                .matrix
-                .iter()
-                .copied()
-                .map(Fixed16::from_f32)
-                .collect(),
-            divisor: Fixed16::from_f32(filter.divisor),
-            bias: Fixed16::from_f32(filter.bias),
+            matrix: filter.matrix.clone(),
+            divisor: filter.divisor,
+            bias: filter.bias,
             default_color: filter.color,
             flags,
         }
@@ -79,9 +70,9 @@ impl From<swf::ConvolutionFilter> for ConvolutionFilterData {
         Self {
             matrix_x: filter.num_matrix_cols,
             matrix_y: filter.num_matrix_rows,
-            matrix: filter.matrix.into_iter().map(Fixed16::to_f32).collect(),
-            divisor: filter.divisor.to_f32(),
-            bias: filter.bias.to_f32(),
+            matrix: filter.matrix,
+            divisor: filter.divisor,
+            bias: filter.bias,
             preserve_alpha,
             clamp,
             color: filter.default_color,
@@ -104,35 +95,34 @@ impl Default for ConvolutionFilterData {
     }
 }
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Copy, Clone, Debug, Collect)]
 #[collect(no_drop)]
 #[repr(transparent)]
 pub struct ConvolutionFilter<'gc>(GcCell<'gc, ConvolutionFilterData>);
 
 impl<'gc> ConvolutionFilter<'gc> {
     fn new(activation: &mut Activation<'_, 'gc>, args: &[Value<'gc>]) -> Result<Self, Error<'gc>> {
-        let convolution_filter = Self(GcCell::new(
-            activation.context.gc_context,
-            Default::default(),
-        ));
+        let convolution_filter = Self(GcCell::new(activation.gc(), Default::default()));
         convolution_filter.set_matrix_x(activation, args.get(0))?;
         convolution_filter.set_matrix_y(activation, args.get(1))?;
-        if let Some(Value::Object(object)) = args.get(2) {
-            convolution_filter.fill_matrix(activation, object)?;
-        }
+        convolution_filter.set_matrix(activation, args.get(2))?;
         if let Some(value) = args.get(3) {
             convolution_filter.set_divisor(activation, Some(value))?;
         } else if !args.is_empty() {
             let divisor = convolution_filter.0.read().matrix.iter().sum();
-            convolution_filter
-                .0
-                .write(activation.context.gc_context)
-                .divisor = divisor;
+            convolution_filter.0.write(activation.gc()).divisor = divisor;
         }
         convolution_filter.set_bias(activation, args.get(4))?;
         convolution_filter.set_preserve_alpha(activation, args.get(5))?;
         convolution_filter.set_clamp(activation, args.get(6))?;
-        convolution_filter.set_color(activation, args.get(7))?;
+        if let Some(value) = args.get(7) {
+            convolution_filter.set_color(activation, Some(value))?;
+
+            // If a substitute color is specified in the constructor in AVM1,
+            // the substitute alpha is set to 1, despite the documentation claiming otherwise.
+            // This does not happen in AVM2.
+            convolution_filter.0.write(activation.gc()).color.a = 255;
+        }
         convolution_filter.set_alpha(activation, args.get(8))?;
         Ok(convolution_filter)
     }
@@ -156,9 +146,7 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let matrix_x = value.coerce_to_i32(activation)?.clamp(0, 15) as u8;
-            self.0
-                .write(activation.context.gc_context)
-                .set_matrix_x(matrix_x);
+            self.0.write(activation.gc()).set_matrix_x(matrix_x);
         }
         Ok(())
     }
@@ -174,39 +162,17 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let matrix_y = value.coerce_to_i32(activation)?.clamp(0, 15) as u8;
-            self.0
-                .write(activation.context.gc_context)
-                .set_matrix_y(matrix_y);
+            self.0.write(activation.gc()).set_matrix_y(matrix_y);
         }
         Ok(())
     }
 
-    fn matrix(&self, context: &mut UpdateContext<'_, 'gc>) -> ArrayObject<'gc> {
+    fn matrix(&self, context: &mut UpdateContext<'gc>) -> ArrayObject<'gc> {
         ArrayObject::new(
-            context.gc_context,
+            context.gc(),
             context.avm1.prototypes().array,
             self.0.read().matrix.iter().map(|&x| x.into()),
         )
-    }
-
-    fn fill_matrix(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        object: &Object<'gc>,
-    ) -> Result<(), Error<'gc>> {
-        let matrix_len = self.0.read().matrix.len();
-        for i in 0..matrix_len {
-            let length = object.length(activation)? as usize;
-            let item = if i < length {
-                object
-                    .get_element(activation, i as i32)
-                    .coerce_to_f64(activation)? as f32
-            } else {
-                0.0
-            };
-            self.0.write(activation.context.gc_context).matrix[i] = item;
-        }
-        Ok(())
     }
 
     fn set_matrix(
@@ -214,16 +180,22 @@ impl<'gc> ConvolutionFilter<'gc> {
         activation: &mut Activation<'_, 'gc>,
         value: Option<&Value<'gc>>,
     ) -> Result<(), Error<'gc>> {
-        if let Some(value) = value {
-            if let Value::Object(object) = value {
-                let length = object.length(activation)?;
-                self.0.write(activation.context.gc_context).matrix = vec![0.0; length as usize];
-                self.fill_matrix(activation, object)?;
-                self.0.write(activation.context.gc_context).resize_matrix();
-            } else {
-                self.0.write(activation.context.gc_context).reset_matrix();
-            }
+        let Some(value) = value else { return Ok(()) };
+
+        // FP 11 and FP 32 behave differently here: in FP 11, only "true" objects resize
+        // the matrix, but in FP 32 strings will too (and so fill the matrix with `NaN`
+        // values, as they have a `length` but no actual elements).
+        let object = value.coerce_to_object(activation);
+        let length = usize::try_from(object.length(activation)?).unwrap_or_default();
+
+        self.0.write(activation.gc()).matrix = vec![0.0; length];
+        for i in 0..length {
+            let elem = object
+                .get_element(activation, i as i32)
+                .coerce_to_f64(activation)? as f32;
+            self.0.write(activation.gc()).matrix[i] = elem;
         }
+        self.0.write(activation.gc()).resize_matrix();
         Ok(())
     }
 
@@ -238,7 +210,7 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let divisor = value.coerce_to_f64(activation)? as f32;
-            self.0.write(activation.context.gc_context).divisor = divisor;
+            self.0.write(activation.gc()).divisor = divisor;
         }
         Ok(())
     }
@@ -254,7 +226,7 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let bias = value.coerce_to_f64(activation)? as f32;
-            self.0.write(activation.context.gc_context).bias = bias;
+            self.0.write(activation.gc()).bias = bias;
         }
         Ok(())
     }
@@ -270,7 +242,7 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let preserve_alpha = value.as_bool(activation.swf_version());
-            self.0.write(activation.context.gc_context).preserve_alpha = preserve_alpha;
+            self.0.write(activation.gc()).preserve_alpha = preserve_alpha;
         }
         Ok(())
     }
@@ -286,7 +258,7 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let clamp = value.as_bool(activation.swf_version());
-            self.0.write(activation.context.gc_context).clamp = clamp;
+            self.0.write(activation.gc()).clamp = clamp;
         }
         Ok(())
     }
@@ -301,8 +273,9 @@ impl<'gc> ConvolutionFilter<'gc> {
         value: Option<&Value<'gc>>,
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
-            let color = Color::from_rgb(value.coerce_to_u32(activation)?, u8::MAX);
-            self.0.write(activation.context.gc_context).color = color;
+            let value = value.coerce_to_u32(activation)?;
+            let mut write = self.0.write(activation.gc());
+            write.color = Color::from_rgb(value, write.color.a);
         }
         Ok(())
     }
@@ -314,7 +287,7 @@ impl<'gc> ConvolutionFilter<'gc> {
     ) -> Result<(), Error<'gc>> {
         if let Some(value) = value {
             let alpha = value.coerce_to_f64(activation)?.clamp_also_nan(0.0, 1.0);
-            self.0.write(activation.context.gc_context).color.a = (alpha * 255.0) as u8;
+            self.0.write(activation.gc()).color.a = (alpha * 255.0) as u8;
         }
         Ok(())
     }
@@ -371,7 +344,7 @@ fn method<'gc>(
     if index == CONSTRUCTOR {
         let convolution_filter = ConvolutionFilter::new(activation, args)?;
         this.set_native(
-            activation.context.gc_context,
+            activation.gc(),
             NativeObject::ConvolutionFilter(convolution_filter),
         );
         return Ok(this.into());
@@ -393,7 +366,7 @@ fn method<'gc>(
             this.set_matrix_y(activation, args.get(0))?;
             Value::Undefined
         }
-        GET_MATRIX => this.matrix(&mut activation.context).into(),
+        GET_MATRIX => this.matrix(activation.context).into(),
         SET_MATRIX => {
             this.set_matrix(activation, args.get(0))?;
             Value::Undefined
@@ -433,22 +406,22 @@ fn method<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let convolution_filter_proto = ScriptObject::new(context.gc_context, Some(proto));
+    let convolution_filter_proto = ScriptObject::new(context.gc(), Some(proto));
     define_properties_on(PROTO_DECLS, context, convolution_filter_proto, fn_proto);
     convolution_filter_proto.into()
 }
 
 pub fn create_constructor<'gc>(
-    context: &mut GcContext<'_, 'gc>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     FunctionObject::constructor(
-        context.gc_context,
+        context.gc(),
         Executable::Native(convolution_filter_method!(0)),
         constructor_to_fn!(convolution_filter_method!(0)),
         fn_proto,

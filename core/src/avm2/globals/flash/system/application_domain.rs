@@ -13,18 +13,20 @@ pub use crate::avm2::object::application_domain_allocator;
 /// is called from the constructor
 pub fn init<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     let parent_domain = if matches!(args[0], Value::Null) {
-        activation.avm2().stage_domain()
+        activation.avm2().playerglobals_domain()
     } else {
         args.get_object(activation, 0, "parentDomain")?
             .as_application_domain()
             .expect("Invalid parent domain")
     };
     let fresh_domain = Domain::movie_domain(activation, parent_domain);
-    this.init_application_domain(activation.context.gc_context, fresh_domain);
+    this.init_application_domain(activation.gc(), fresh_domain);
 
     Ok(Value::Undefined)
 }
@@ -32,7 +34,7 @@ pub fn init<'gc>(
 /// `currentDomain` static property.
 pub fn get_current_domain<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let appdomain = activation
@@ -45,12 +47,14 @@ pub fn get_current_domain<'gc>(
 /// `parentDomain` property
 pub fn get_parent_domain<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(appdomain) = this.as_application_domain() {
         if let Some(parent_domain) = appdomain.parent_domain() {
-            if parent_domain.is_playerglobals_domain(activation) {
+            if parent_domain.is_playerglobals_domain(activation.avm2()) {
                 return Ok(Value::Null);
             }
             return Ok(DomainObject::from_domain(activation, parent_domain)?.into());
@@ -63,15 +67,16 @@ pub fn get_parent_domain<'gc>(
 /// `getDefinition` method
 pub fn get_definition<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(appdomain) = this.as_application_domain() {
-        let name = args
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "".into())
-            .coerce_to_string(activation)?;
+        let name = match args.get(0) {
+            Some(arg) => arg.coerce_to_string(activation)?,
+            None => activation.strings().empty(),
+        };
         return appdomain.get_defined_value_handling_vector(activation, name);
     }
 
@@ -81,15 +86,16 @@ pub fn get_definition<'gc>(
 /// `hasDefinition` method
 pub fn has_definition<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(appdomain) = this.as_application_domain() {
-        let name = args
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "".into())
-            .coerce_to_string(activation)?;
+        let name = match args.get(0) {
+            Some(arg) => arg.coerce_to_string(activation)?,
+            None => activation.strings().empty(),
+        };
 
         return Ok(appdomain
             .get_defined_value_handling_vector(activation, name)
@@ -105,9 +111,11 @@ pub fn has_definition<'gc>(
 /// NOTE: Normally only available in Flash Player 11.3+.
 pub fn get_qualified_definition_names<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(appdomain) = this.as_application_domain() {
         // NOTE: According to the docs of 'getQualifiedDeinitionNames',
         // it is able to throw a 'SecurityError' if "The definition belongs
@@ -120,10 +128,10 @@ pub fn get_qualified_definition_names<'gc>(
                 .get_defined_names()
                 .iter()
                 .filter(|name| !name.namespace().is_private())
-                .map(|name| Value::String(name.to_qualified_name(activation.context.gc_context)))
+                .map(|name| Value::String(name.to_qualified_name(activation.gc())))
                 .collect(),
             false,
-            Some(activation.avm2().classes().string),
+            Some(activation.avm2().class_defs().string),
         );
 
         let name_vector = VectorObject::from_vector(storage, activation)?;
@@ -137,9 +145,11 @@ pub fn get_qualified_definition_names<'gc>(
 /// `domainMemory` property setter
 pub fn set_domain_memory<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(appdomain) = this.as_application_domain() {
         let obj = args.try_get_object(activation, 0);
         if let Some(obj) = obj {
@@ -155,9 +165,11 @@ pub fn set_domain_memory<'gc>(
 /// `domainMemory` property getter
 pub fn get_domain_memory<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if let Some(appdomain) = this.as_application_domain() {
         if appdomain.is_default_domain_memory() {
             return Ok(Value::Null);

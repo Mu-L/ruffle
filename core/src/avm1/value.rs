@@ -1,17 +1,17 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::ExecutionReason;
-use crate::avm1::object::value_object::ValueObject;
 use crate::avm1::object::NativeObject;
-use crate::avm1::{Object, TObject};
+use crate::avm1::{Object, ScriptObject, TObject};
 use crate::display_object::TDisplayObject;
 use crate::ecma_conversions::{
     f64_to_wrapping_i16, f64_to_wrapping_i32, f64_to_wrapping_u16, f64_to_wrapping_u32,
     f64_to_wrapping_u8,
 };
 use crate::string::{AvmAtom, AvmString, Integer, WStr};
-use gc_arena::Collect;
-use std::{borrow::Cow, io::Write, mem::size_of, num::Wrapping};
+use gc_arena::{Collect, Gc};
+use ruffle_macros::istr;
+use std::{io::Write, mem::size_of, num::Wrapping};
 
 use super::object_reference::MovieClipReference;
 
@@ -48,13 +48,13 @@ impl<'gc> From<AvmAtom<'gc>> for Value<'gc> {
     }
 }
 
-impl<'gc> From<&'static str> for Value<'gc> {
+impl From<&'static str> for Value<'_> {
     fn from(string: &'static str) -> Self {
         Value::String(string.into())
     }
 }
 
-impl<'gc> From<bool> for Value<'gc> {
+impl From<bool> for Value<'_> {
     fn from(value: bool) -> Self {
         Value::Bool(value)
     }
@@ -69,61 +69,61 @@ where
     }
 }
 
-impl<'gc> From<f64> for Value<'gc> {
+impl From<f64> for Value<'_> {
     fn from(value: f64) -> Self {
         Value::Number(value)
     }
 }
 
-impl<'gc> From<f32> for Value<'gc> {
+impl From<f32> for Value<'_> {
     fn from(value: f32) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<i8> for Value<'gc> {
+impl From<i8> for Value<'_> {
     fn from(value: i8) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<u8> for Value<'gc> {
+impl From<u8> for Value<'_> {
     fn from(value: u8) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<i16> for Value<'gc> {
+impl From<i16> for Value<'_> {
     fn from(value: i16) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<u16> for Value<'gc> {
+impl From<u16> for Value<'_> {
     fn from(value: u16) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<i32> for Value<'gc> {
+impl From<i32> for Value<'_> {
     fn from(value: i32) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<u32> for Value<'gc> {
+impl From<u32> for Value<'_> {
     fn from(value: u32) -> Self {
         Value::Number(f64::from(value))
     }
 }
 
-impl<'gc> From<u64> for Value<'gc> {
+impl From<u64> for Value<'_> {
     fn from(value: u64) -> Self {
         Value::Number(value as f64)
     }
 }
 
-impl<'gc> From<usize> for Value<'gc> {
+impl From<usize> for Value<'_> {
     fn from(value: usize) -> Self {
         Value::Number(value as f64)
     }
@@ -160,10 +160,10 @@ impl<'gc> Value<'gc> {
     /// we are aware, version-gated:
     ///
     /// * In SWF6 and lower, `undefined` is coerced to `0.0` (like `false`)
-    /// rather than `NaN` as required by spec.
+    ///   rather than `NaN` as required by spec.
     /// * In SWF5 and lower, hexadecimal is unsupported.
     /// * In SWF4 and lower, `0.0` is returned rather than `NaN` if a string cannot
-    /// be converted to a number.
+    ///   be converted to a number.
     fn primitive_as_number(&self, activation: &mut Activation<'_, 'gc>) -> f64 {
         match self {
             Value::Undefined if activation.swf_version() < 7 => 0.0,
@@ -207,7 +207,7 @@ impl<'gc> Value<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         Ok(match self {
             Value::Object(object) if object.as_display_object().is_none() => {
-                object.call_method("valueOf".into(), &[], activation, ExecutionReason::Special)?
+                object.call_method(istr!("valueOf"), &[], activation, ExecutionReason::Special)?
             }
             val => val.to_owned(),
         })
@@ -234,7 +234,7 @@ impl<'gc> Value<'gc> {
                 let val = if activation.swf_version() > 5 && is_date {
                     // In SWFv6 and higher, Date objects call `toString`.
                     object.call_method(
-                        "toString".into(),
+                        istr!("toString"),
                         &[],
                         activation,
                         ExecutionReason::Special,
@@ -242,7 +242,7 @@ impl<'gc> Value<'gc> {
                 } else {
                     // Other objects call `valueOf`.
                     object.call_method(
-                        "valueOf".into(),
+                        istr!("valueOf"),
                         &[],
                         activation,
                         ExecutionReason::Special,
@@ -260,7 +260,7 @@ impl<'gc> Value<'gc> {
                 let object = self.coerce_to_object(activation);
                 // Other objects call `valueOf`.
                 let res = object.call_method(
-                    "valueOf".into(),
+                    istr!("valueOf"),
                     &[],
                     activation,
                     ExecutionReason::Special,
@@ -410,19 +410,23 @@ impl<'gc> Value<'gc> {
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<AvmString<'gc>, Error<'gc>> {
         Ok(match self {
-            Value::Undefined if activation.swf_version() < 7 => "".into(),
-            Value::Bool(true) if activation.swf_version() < 5 => "1".into(),
-            Value::Bool(false) if activation.swf_version() < 5 => "0".into(),
+            Value::Undefined if activation.swf_version() < 7 => activation.strings().empty(),
+            Value::Bool(true) if activation.swf_version() < 5 => {
+                activation.strings().ascii_char(b'1')
+            }
+            Value::Bool(false) if activation.swf_version() < 5 => {
+                activation.strings().ascii_char(b'0')
+            }
             Value::Object(object) => {
                 if let Some(object) = object
                     .as_display_object()
                     .filter(|_| !matches!(object, Object::SuperObject(_)))
                 {
                     // StageObjects are special-cased to return their path.
-                    AvmString::new(activation.context.gc_context, object.path())
+                    AvmString::new(activation.gc(), object.path())
                 } else {
                     match object.call_method(
-                        "toString".into(),
+                        istr!("toString"),
                         &[],
                         activation,
                         ExecutionReason::Special,
@@ -439,14 +443,11 @@ impl<'gc> Value<'gc> {
                 }
             }
             Value::MovieClip(mcr) => mcr.coerce_to_string(activation),
-            Value::Undefined => "undefined".into(),
-            Value::Null => "null".into(),
-            Value::Bool(true) => "true".into(),
-            Value::Bool(false) => "false".into(),
-            Value::Number(v) => match f64_to_string(*v) {
-                Cow::Borrowed(s) => s.into(),
-                Cow::Owned(s) => AvmString::new_utf8(activation.context.gc_context, s),
-            },
+            Value::Undefined => istr!("undefined"),
+            Value::Null => istr!("null"),
+            Value::Bool(true) => istr!("true"),
+            Value::Bool(false) => istr!("false"),
+            Value::Number(v) => f64_to_string(activation, *v),
             Value::String(v) => v.to_owned(),
         })
     }
@@ -468,29 +469,53 @@ impl<'gc> Value<'gc> {
         }
     }
 
-    pub fn type_of(&self) -> &'static str {
+    pub fn type_of(&self, activation: &mut Activation<'_, 'gc>) -> AvmString<'gc> {
         match self {
-            Value::Undefined => "undefined",
-            Value::Null => "null",
-            Value::Number(_) => "number",
-            Value::Bool(_) => "boolean",
-            Value::String(_) => "string",
-            Value::Object(object) if object.as_executable().is_some() => "function",
-            Value::MovieClip(_) => "movieclip",
-            Value::Object(_) => "object",
+            Value::Undefined => istr!("undefined"),
+            Value::Null => istr!("null"),
+            Value::Number(_) => istr!("number"),
+            Value::Bool(_) => istr!("boolean"),
+            Value::String(_) => istr!("string"),
+            Value::Object(object) if object.as_executable().is_some() => istr!("function"),
+            Value::MovieClip(_) => istr!("movieclip"),
+            Value::Object(_) => istr!("object"),
         }
     }
 
-    pub fn coerce_to_object(&self, activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
-        if let Value::MovieClip(mcr) = self {
-            if let Some(obj) = mcr.coerce_to_object(activation) {
-                obj
-            } else {
-                ValueObject::boxed(activation, Value::Undefined)
+    pub fn coerce_to_object(self, activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
+        let (value, proto) = match self {
+            // If we're given an object, we return it directly.
+            Value::Object(obj) => return obj,
+            Value::MovieClip(mcr) => {
+                if let Some(obj) = mcr.coerce_to_object(activation) {
+                    return obj;
+                } else {
+                    (Value::Undefined, None)
+                }
             }
-        } else {
-            ValueObject::boxed(activation, self.to_owned())
-        }
+            // Else, select the correct prototype for it from the system prototypes list.
+            Value::Null | Value::Undefined => (self, None),
+            Value::Bool(_) => (self, Some(activation.context.avm1.prototypes().boolean)),
+            Value::Number(_) => (self, Some(activation.context.avm1.prototypes().number)),
+            Value::String(_) => (self, Some(activation.context.avm1.prototypes().string)),
+        };
+
+        let obj = ScriptObject::new(activation.gc(), proto).into();
+
+        // Constructor populates the boxed object with the value.
+        use crate::avm1::globals;
+        let _ = match value {
+            Value::Bool(_) => globals::boolean::constructor(activation, obj, &[value]),
+            Value::Number(_) => globals::number::number(activation, obj, &[value]),
+            Value::String(_) => globals::string::string(activation, obj, &[value]),
+            _ => {
+                let vbox = Gc::new(activation.gc(), Value::Undefined);
+                obj.set_native(activation.gc(), NativeObject::Value(vbox));
+                Ok(Value::Undefined)
+            }
+        };
+
+        obj
     }
 
     pub fn as_blend_mode(&self) -> Option<swf::BlendMode> {
@@ -531,24 +556,31 @@ fn decimal_shift(mut value: f64, mut exp: i32) -> f64 {
     value
 }
 
-/// Converts an `f64` to a String with (hopefully) the same output as Flash AVM1.
+/// Converts an `f64` to an AvmString with (hopefully) the same output as Flash AVM1.
 /// 15 digits are displayed (not including leading 0s in a decimal <1).
 /// Exponential notation is used for numbers <= 1e-5 and >= 1e15.
 /// Rounding done with ties rounded away from zero.
 /// NAN returns `"NaN"`, and infinity returns `"Infinity"`.
 #[allow(clippy::approx_constant)]
-fn f64_to_string(mut n: f64) -> Cow<'static, str> {
+fn f64_to_string<'gc>(activation: &mut Activation<'_, 'gc>, mut n: f64) -> AvmString<'gc> {
     if n.is_nan() {
-        Cow::Borrowed("NaN")
+        istr!("NaN")
     } else if n == f64::INFINITY {
-        Cow::Borrowed("Infinity")
+        istr!("Infinity")
     } else if n == f64::NEG_INFINITY {
-        Cow::Borrowed("-Infinity")
+        // FIXME is there an easy way to use istr! here?
+        AvmString::new_utf8_bytes(activation.gc(), b"-Infinity")
     } else if n == 0.0 {
-        Cow::Borrowed("0")
+        activation.strings().ascii_char(b'0')
     } else if n >= -2147483648.0 && n <= 2147483647.0 && n.fract() == 0.0 {
         // Fast path for integers.
-        (n as i32).to_string().into()
+        let n = n as i32;
+
+        if n >= 0 && n < 10 {
+            activation.strings().ascii_char(b'0' + n as u8)
+        } else {
+            AvmString::new_utf8(activation.gc(), n.to_string())
+        }
     } else {
         // AVM1 f64 -> String (also trying to reproduce bugs).
         // Flash Player's AVM1 does this in a straightforward way, shifting the float into the
@@ -711,9 +743,7 @@ fn f64_to_string(mut n: f64) -> Cow<'static, str> {
             start = 1;
         }
 
-        // SAFETY: Buffer is guaranteed to only contain ASCII digits.
-        let s = unsafe { std::str::from_utf8_unchecked(&buf[start..]) };
-        s.to_string().into()
+        AvmString::new_utf8_bytes(activation.gc(), &buf[start..])
     }
 }
 
@@ -740,7 +770,7 @@ fn parse_sign(s: &mut &WStr) -> bool {
 /// * `strict == false` ignores trailing garbage (like `parseFloat()`).
 pub fn parse_float_impl(mut s: &WStr, strict: bool) -> f64 {
     fn is_ascii_digit(c: u16) -> bool {
-        u8::try_from(c).map_or(false, |c| c.is_ascii_digit())
+        u8::try_from(c).is_ok_and(|c| c.is_ascii_digit())
     }
 
     // Allow leading whitespace.
@@ -897,6 +927,7 @@ mod test {
     use crate::avm1::test_utils::with_avm;
     use crate::avm1::Value;
     use crate::string::AvmString;
+    use ruffle_macros::istr;
 
     #[test]
     fn to_primitive_num() {
@@ -914,7 +945,7 @@ mod test {
             );
             assert_eq!(null.to_primitive_num(activation).unwrap(), null);
 
-            let (protos, global, _) = create_globals(&mut activation.context.borrow_gc());
+            let (protos, global, _) = create_globals(activation.strings());
             let vglobal = Value::Object(global);
 
             assert_eq!(vglobal.to_primitive_num(activation).unwrap(), undefined);
@@ -928,16 +959,16 @@ mod test {
             }
 
             let valueof = FunctionObject::function(
-                activation.context.gc_context,
+                activation.gc(),
                 Executable::Native(value_of_impl),
                 protos.function,
                 protos.function,
             );
 
-            let o = ScriptObject::new(activation.context.gc_context, Some(protos.object));
+            let o = ScriptObject::new(activation.gc(), Some(protos.object));
             o.define_value(
-                activation.context.gc_context,
-                "valueOf",
+                activation.gc(),
+                istr!("valueOf"),
                 valueof.into(),
                 Attribute::empty(),
             );
@@ -965,7 +996,7 @@ mod test {
             assert_eq!(f.coerce_to_f64(activation).unwrap(), 0.0);
             assert!(n.coerce_to_f64(activation).unwrap().is_nan());
 
-            let o = ScriptObject::new(activation.context.gc_context, None);
+            let o = ScriptObject::new(activation.gc(), None);
 
             assert!(Value::from(o).coerce_to_f64(activation).unwrap().is_nan());
 
@@ -987,7 +1018,7 @@ mod test {
             assert_eq!(f.coerce_to_f64(activation).unwrap(), 0.0);
             assert_eq!(n.coerce_to_f64(activation).unwrap(), 0.0);
 
-            let o = ScriptObject::new(activation.context.gc_context, None);
+            let o = ScriptObject::new(activation.gc(), None);
 
             assert_eq!(Value::from(o).coerce_to_f64(activation).unwrap(), 0.0);
 
@@ -1052,8 +1083,8 @@ mod test {
     #[test]
     fn abstract_lt_str() {
         with_avm(8, |activation, _this| -> Result<(), Error> {
-            let a = Value::String(AvmString::new_utf8(activation.context.gc_context, "a"));
-            let b = Value::String(AvmString::new_utf8(activation.context.gc_context, "b"));
+            let a = Value::String(AvmString::new_utf8(activation.gc(), "a"));
+            let b = Value::String(AvmString::new_utf8(activation.gc(), "b"));
 
             assert_eq!(a.abstract_lt(b, activation).unwrap(), Value::Bool(true));
 
@@ -1064,8 +1095,8 @@ mod test {
     #[test]
     fn abstract_gt_str() {
         with_avm(8, |activation, _this| -> Result<(), Error> {
-            let a = Value::String(AvmString::new_utf8(activation.context.gc_context, "a"));
-            let b = Value::String(AvmString::new_utf8(activation.context.gc_context, "b"));
+            let a = Value::String(AvmString::new_utf8(activation.gc(), "a"));
+            let b = Value::String(AvmString::new_utf8(activation.gc(), "b"));
 
             assert_eq!(b.abstract_lt(a, activation).unwrap(), Value::Bool(false));
 
@@ -1139,42 +1170,50 @@ mod test {
 
     #[test]
     fn f64_to_string() {
-        use super::f64_to_string;
-        assert_eq!(f64_to_string(0.0), "0");
-        assert_eq!(f64_to_string(-0.0), "0");
-        assert_eq!(f64_to_string(1.0), "1");
-        assert_eq!(f64_to_string(1.4), "1.4");
-        assert_eq!(f64_to_string(-990.123), "-990.123");
-        assert_eq!(f64_to_string(f64::NAN), "NaN");
-        assert_eq!(f64_to_string(f64::INFINITY), "Infinity");
-        assert_eq!(f64_to_string(f64::NEG_INFINITY), "-Infinity");
-        assert_eq!(f64_to_string(9.9999e14), "999990000000000");
-        assert_eq!(f64_to_string(-9.9999e14), "-999990000000000");
-        assert_eq!(f64_to_string(1e15), "1e+15");
-        assert_eq!(f64_to_string(-1e15), "-1e+15");
-        assert_eq!(f64_to_string(1e-5), "0.00001");
-        assert_eq!(f64_to_string(-1e-5), "-0.00001");
-        assert_eq!(f64_to_string(0.999e-5), "9.99e-6");
-        assert_eq!(f64_to_string(-0.999e-5), "-9.99e-6");
-        assert_eq!(f64_to_string(0.19999999999999996), "0.2");
-        assert_eq!(f64_to_string(-0.19999999999999996), "-0.2");
-        assert_eq!(f64_to_string(100000.12345678912), "100000.123456789");
-        assert_eq!(f64_to_string(-100000.12345678912), "-100000.123456789");
-        assert_eq!(f64_to_string(0.8000000000000005), "0.800000000000001");
-        assert_eq!(f64_to_string(-0.8000000000000005), "-0.800000000000001");
-        assert_eq!(f64_to_string(0.8300000000000005), "0.83");
-        assert_eq!(f64_to_string(1e-320), "9.99988867182684e-321");
-        assert_eq!(f64_to_string(f64::MIN), "-1.79769313486231e+308");
-        assert_eq!(f64_to_string(f64::MIN_POSITIVE), "2.2250738585072e-308");
-        assert_eq!(f64_to_string(f64::MAX), "1.79769313486231e+308");
-        assert_eq!(f64_to_string(5e-324), "4.94065645841247e-324");
-        assert_eq!(f64_to_string(9.999999999999999), "10");
-        assert_eq!(f64_to_string(-9.999999999999999), "-10");
-        assert_eq!(f64_to_string(9999999999999996.0), "1e+16");
-        assert_eq!(f64_to_string(-9999999999999996.0), "-e+16"); // wat
-        assert_eq!(f64_to_string(0.000009999999999999996), "1e-5");
-        assert_eq!(f64_to_string(-0.000009999999999999996), "-10e-6");
-        assert_eq!(f64_to_string(0.00009999999999999996), "0.0001");
-        assert_eq!(f64_to_string(-0.00009999999999999996), "-0.0001");
+        use super::f64_to_string as f64_to_avm_string;
+
+        with_avm(8, |activation, _this| -> Result<(), Error> {
+            let mut f64_to_string = |value: f64| f64_to_avm_string(activation, value).to_string();
+
+            assert_eq!(f64_to_string(0.0), "0");
+            assert_eq!(f64_to_string(-0.0), "0");
+            assert_eq!(f64_to_string(1.0), "1");
+            assert_eq!(f64_to_string(5.0), "5");
+            assert_eq!(f64_to_string(1.4), "1.4");
+            assert_eq!(f64_to_string(-990.123), "-990.123");
+            assert_eq!(f64_to_string(f64::NAN), "NaN");
+            assert_eq!(f64_to_string(f64::INFINITY), "Infinity");
+            assert_eq!(f64_to_string(f64::NEG_INFINITY), "-Infinity");
+            assert_eq!(f64_to_string(9.9999e14), "999990000000000");
+            assert_eq!(f64_to_string(-9.9999e14), "-999990000000000");
+            assert_eq!(f64_to_string(1e15), "1e+15");
+            assert_eq!(f64_to_string(-1e15), "-1e+15");
+            assert_eq!(f64_to_string(1e-5), "0.00001");
+            assert_eq!(f64_to_string(-1e-5), "-0.00001");
+            assert_eq!(f64_to_string(0.999e-5), "9.99e-6");
+            assert_eq!(f64_to_string(-0.999e-5), "-9.99e-6");
+            assert_eq!(f64_to_string(0.19999999999999996), "0.2");
+            assert_eq!(f64_to_string(-0.19999999999999996), "-0.2");
+            assert_eq!(f64_to_string(100000.12345678912), "100000.123456789");
+            assert_eq!(f64_to_string(-100000.12345678912), "-100000.123456789");
+            assert_eq!(f64_to_string(0.8000000000000005), "0.800000000000001");
+            assert_eq!(f64_to_string(-0.8000000000000005), "-0.800000000000001");
+            assert_eq!(f64_to_string(0.8300000000000005), "0.83");
+            assert_eq!(f64_to_string(1e-320), "9.99988867182684e-321");
+            assert_eq!(f64_to_string(f64::MIN), "-1.79769313486231e+308");
+            assert_eq!(f64_to_string(f64::MIN_POSITIVE), "2.2250738585072e-308");
+            assert_eq!(f64_to_string(f64::MAX), "1.79769313486231e+308");
+            assert_eq!(f64_to_string(5e-324), "4.94065645841247e-324");
+            assert_eq!(f64_to_string(9.999999999999999), "10");
+            assert_eq!(f64_to_string(-9.999999999999999), "-10");
+            assert_eq!(f64_to_string(9999999999999996.0), "1e+16");
+            assert_eq!(f64_to_string(-9999999999999996.0), "-e+16"); // wat
+            assert_eq!(f64_to_string(0.000009999999999999996), "1e-5");
+            assert_eq!(f64_to_string(-0.000009999999999999996), "-10e-6");
+            assert_eq!(f64_to_string(0.00009999999999999996), "0.0001");
+            assert_eq!(f64_to_string(-0.00009999999999999996), "-0.0001");
+
+            Ok(())
+        });
     }
 }

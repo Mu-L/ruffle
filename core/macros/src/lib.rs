@@ -1,13 +1,17 @@
 //! Proc macros used by Ruffle to generate various boilerplate.
 extern crate proc_macro;
+
 use proc_macro::TokenStream;
-use quote::quote;
+use proc_macro2::TokenStream as TokenStream2;
+use quote::{format_ident, quote};
+use syn::parse::{Parse, ParseStream};
 use syn::{
-    parse_macro_input, parse_quote, FnArg, ImplItem, ImplItemFn, ItemEnum, ItemTrait, Pat,
-    TraitItem, Visibility,
+    parse_macro_input, parse_quote, FnArg, ImplItem, ImplItemFn, ItemEnum, ItemTrait, LitStr, Meta,
+    Pat, TraitItem, Visibility,
 };
 
-/// `enum_trait_object` will define an enum whose variants each implement a trait.
+/// Define an enum whose variants each implement a trait.
+///
 /// It can be used as faux-dynamic dispatch. This is used as an alternative to a
 /// trait object, which doesn't get along with GC'd types.
 ///
@@ -35,7 +39,7 @@ use syn::{
 #[proc_macro_attribute]
 pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input.
-    let input_trait = parse_macro_input!(item as ItemTrait);
+    let mut input_trait = parse_macro_input!(item as ItemTrait);
     let trait_name = &input_trait.ident;
     let trait_generics = &input_trait.generics;
     let enum_input = parse_macro_input!(args as ItemEnum);
@@ -62,10 +66,33 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
     // to the underlying type.
     let trait_methods: Vec<_> = input_trait
         .items
-        .iter()
-        .map(|item| match item {
-            TraitItem::Fn(method) => {
+        .iter_mut()
+        .filter_map(|item| match item {
+            TraitItem::Fn(ref mut method) => {
                 let method_name = &method.sig.ident;
+
+                let mut is_no_dynamic = false;
+
+                method.attrs.retain(|attr| match &attr.meta {
+                    Meta::Path(path) => {
+                        if path.is_ident("no_dynamic") {
+                            is_no_dynamic = true;
+
+                            // Remove the #[no_dynamic] attribute from the
+                            // list of method attributes.
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ => true,
+                });
+
+                if is_no_dynamic {
+                    // Don't create this method as a dynamic-dispatch method
+                    return None;
+                }
+
                 let params: Vec<_> = method
                     .sig
                     .inputs
@@ -91,19 +118,20 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
                         }
                     })
                     .collect();
+
                 let method_block = quote!({
                     match self {
                         #(#match_arms)*
                     }
                 });
 
-                ImplItem::Fn(ImplItemFn {
+                Some(ImplItem::Fn(ImplItemFn {
                     attrs: method.attrs.clone(),
                     vis: Visibility::Inherited,
                     defaultness: None,
                     sig: method.sig.clone(),
                     block: parse_quote!(#method_block),
-                })
+                }))
             }
             _ => panic!("Unsupported trait item: {item:?}"),
         })
@@ -147,4 +175,76 @@ pub fn enum_trait_object(args: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     out.into()
+}
+
+/// Get the string passed to it as an interned `AvmAtom`, assumed to be present on
+/// the current `StringContext`.
+///
+/// If no extra parameter is passed, an `activation: Activation<'_, 'gc>` variable will be
+/// assumed to be in scope and will be used to retrieve the interned string. Otherwise, the
+/// extra parameter should implement the `HasStringContext` trait.
+///
+/// ```rs
+/// istr!("description");
+/// // expands to:
+/// activation.context.strings.common().str_description;
+///
+/// istr!(context, "description");
+/// // expands to:
+/// HasStringContext::strings_ref(context).str_description;
+/// ```
+#[proc_macro]
+pub fn atom(item: TokenStream) -> TokenStream {
+    atom_internal(item, |atom| atom)
+}
+
+/// Like `atom!`, but returns an `AvmString` instead of an `AvmAtom`.
+#[proc_macro]
+pub fn istr(item: TokenStream) -> TokenStream {
+    atom_internal(item, |atom| {
+        quote!(
+            crate::string::AvmString::from(#atom)
+        )
+    })
+}
+
+fn atom_internal(
+    item: TokenStream,
+    transform: impl FnOnce(TokenStream2) -> TokenStream2,
+) -> TokenStream {
+    struct Input {
+        str: LitStr,
+        context: Option<syn::Expr>,
+    }
+
+    impl Parse for Input {
+        fn parse(input: ParseStream) -> syn::Result<Self> {
+            let mut context = None;
+            if !input.peek(syn::LitStr) {
+                context = Some(input.parse()?);
+                input.parse::<syn::token::Comma>()?;
+            }
+
+            let str = input.parse()?;
+            Ok(Self { context, str })
+        }
+    }
+
+    let input = parse_macro_input!(item as Input);
+    let string_ident = format_ident!("str_{}", input.str.value());
+
+    let atom = if let Some(context) = input.context {
+        quote!(
+            crate::string::HasStringContext::strings_ref(#context).common().#string_ident
+        )
+    } else {
+        quote!(
+            // Use raw field access instead of `HasStringContext` here:
+            // - it's more permissive for the borrow checker;
+            // - it works for both by-ref and by-value `Activation`s.
+            activation.context.strings.common().#string_ident
+        )
+    };
+
+    transform(atom).into()
 }
